@@ -1,0 +1,62 @@
+import fs from 'node:fs';
+
+export class GuardError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'GuardError';
+    this.code = code;
+  }
+}
+
+export function normalize(s) {
+  return s.normalize('NFKC').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+export function loadTerms(path) {
+  let raw;
+  try {
+    raw = fs.readFileSync(path, 'utf8');
+  } catch (e) {
+    if (e.code === 'ENOENT') throw new GuardError('TERMS_MISSING', 'blocked-terms file not found');
+    throw e;
+  }
+  const terms = [];
+  raw.split(/\r?\n/).forEach((line, i) => {
+    const index = i + 1;
+    const trimmed = line.trim();
+    if (trimmed === '' || trimmed.startsWith('#')) return;
+    let mode = 'loose';
+    let body = trimmed;
+    if (/^word:/i.test(trimmed)) {
+      mode = 'word';
+      body = trimmed.slice(5).trim();
+    }
+    const norm = normalize(body);
+    if (norm === '') {
+      throw new GuardError('TERMS_INVALID',
+        mode === 'word'
+          ? `blocked-terms line ${index} is empty after "word:"`
+          : `blocked-terms line ${index} is empty after normalization`);
+    }
+    terms.push({ index, mode, norm });
+  });
+  if (terms.length === 0) throw new GuardError('TERMS_EMPTY', 'blocked-terms file has no terms');
+  return terms;
+}
+
+export function findTerms(text, terms) {
+  const hits = [];
+  const wordRes = new Map();
+  for (const t of terms) {
+    if (t.mode === 'word') wordRes.set(t, new RegExp(`\\b${t.norm}\\b`, 'i'));
+  }
+  text.split(/\r?\n/).forEach((line, i) => {
+    const folded = normalize(line);
+    const nfkc = line.normalize('NFKC');
+    for (const t of terms) {
+      const hit = t.mode === 'word' ? wordRes.get(t).test(nfkc) : folded.includes(t.norm);
+      if (hit) hits.push({ line: i + 1, termIndex: t.index });
+    }
+  });
+  return hits;
+}
