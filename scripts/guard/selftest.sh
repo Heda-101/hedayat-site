@@ -167,6 +167,20 @@ rm -f "$R/.githooks/pre-push"
 out="$(hook "$R" 'git commit -m x' 2>&1)"; expect "layer 3" "missing pre-push hook: git commit is blocked" 2 $? "$out"
 out="$(hook "$R" 'git status' 2>&1)"; expect "layer 3" "missing pre-push hook: git status still allowed" 0 $? "$out"
 
+# R21: an Edit or Write to a guard file asks a human; any other file passes silently.
+EDIT_CMD="$(node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const e=s.hooks.PreToolUse.find((x)=>x.matcher==="Edit|Write|MultiEdit|NotebookEdit"); process.stdout.write(e?e.hooks[0].command:"")' "$ROOT/.claude/settings.json")"
+edit_hook() { # <repo> <tool> <file>
+  local json
+  json="$(node -e 'process.stdout.write(JSON.stringify({tool_name:process.argv[1],tool_input:{file_path:process.argv[2]},cwd:process.argv[3]}))' "$2" "$3" "$1")"
+  (cd "$1" && printf '%s' "$json" | CLAUDE_PROJECT_DIR="$1" /bin/sh -c "$EDIT_CMD")
+}
+out="$(edit_hook "$R" Edit "$R/scripts/guard/check.mjs" 2>&1)"; rc=$?
+case "$out" in *'"permissionDecision":"ask"'*) got=$rc ;; *) got="no-ask($rc)" ;; esac
+expect "layer 3" "Edit of a guard file asks for approval" 0 "$got" "$out"
+out="$(edit_hook "$R" Write "$R/src/page.astro" 2>&1)"; rc=$?
+[ -z "$out" ] || rc="output($rc)"
+expect "layer 3" "Write of an ordinary file passes silently" 0 "$rc" "$out"
+
 # Node 22 unreachable: the hook must fail closed.
 R="$WORK/l3"
 out="$(cd "$R" && printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git status"},"cwd":"x"}' \
