@@ -55,6 +55,11 @@ function globToRe(seg) {
   return new RegExp(`^${re}$`, 'i');
 }
 
+// namesHooksDir over each shell word of a whole command string.
+export function wordsNameHooksDir(cmd) {
+  return cmd.split(/[\s;|&()<>]+/).some((w) => w && namesHooksDir(w));
+}
+
 // True when a word names .githooks literally, or could expand to it via a glob or braces.
 export function namesHooksDir(v) {
   const d = dequote(v);
@@ -94,9 +99,9 @@ function lex(src, start = 0, depth = 0, out = { substs: [] }) {
     // open is the index of the first char after `$(`, `<(` or `>(`
     const inner = lex(src, open, depth + 1, out);
     if (inner.error) return inner;
-    out.substs.push({ text: src.slice(open, inner.end), parts: inner.parts, src, raw: src.slice(open - 2, inner.end + 1),
-      start: open - 2, end: inner.end + 1, dollar: src[open - 2] === '$' });
     const w = word();
+    out.substs.push({ text: src.slice(open, inner.end), parts: inner.parts, src, raw: src.slice(open - 2, inner.end + 1),
+      start: open - 2, end: inner.end + 1, dollar: src[open - 2] === '$', tok: w });
     w.v += src.slice(open - 2, inner.end + 1);
     w.dyn = true;
     return { end: inner.end + 1 };
@@ -258,6 +263,62 @@ const INTERPRETERS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'csh',
 const READONLY_CMDS = new Set(['cat', 'ls', 'head', 'tail', 'less', 'more', 'grep', 'egrep', 'fgrep', 'rg', 'wc', 'file',
   'stat', 'diff', 'bat', 'shellcheck', 'shasum', 'md5', 'od', 'xxd', 'hexdump', 'test', '[']);
 const WHERE_CMDS = new Set(['which', 'type', 'whereis', 'man', 'brew', 'apropos']);
+// Commands that never execute their arguments: a `git` argument to these is data.
+const DATA_CMDS = new Set(['cat', 'grep', 'egrep', 'fgrep', 'rg', 'ls', 'echo', 'printf', 'head', 'tail', 'wc', 'sed',
+  'less', 'more', 'file', 'stat', 'diff', 'bat', 'jq', 'which', 'type', 'whereis', 'man', 'cd', 'pushd', 'popd']);
+
+// sed counts as data only when no script uses the e (execute) or w/W (write) commands or flags.
+function sedIsData(args) {
+  const scripts = [];
+  let saw = false;
+  for (let k = 0; k < args.length; k++) {
+    const v = args[k].v;
+    if (args[k].dyn) return false;
+    if (v === '--expression' || /^-[A-Za-z]*e$/.test(v)) { scripts.push(args[k + 1] ? args[k + 1].v : ''); k++; saw = true; continue; }
+    if (v.startsWith('--expression=')) { scripts.push(v.slice(13)); saw = true; continue; }
+    if (v.startsWith('--file') || /^-[A-Za-z]*f/.test(v)) return false;
+    if (v.startsWith('-')) continue;
+    if (!saw) { scripts.push(v); saw = true; }
+  }
+  for (const sc of scripts) {
+    const stripped = sc
+      .replace(/s(.)(?:\\.|(?!\1)[^\\])*\1(?:\\.|(?!\1)[^\\])*\1/g, 's')
+      .replace(/\/(?:\\.|[^/\\])*\//g, '');
+    if (/[ewW]/.test(stripped)) return false;
+  }
+  return true;
+}
+
+// Tokens that are message values: git commit|tag|merge -m/--message/-F/--file <v>,
+// gh pr|issue create|edit --body/--title/-b/-t <v> (or the --opt=<v> forms).
+const GIT_MSG_SUBS = new Set(['commit', 'tag', 'merge']);
+const GIT_MSG_OPTS = ['-m', '--message', '-F', '--file'];
+const GH_MSG_OPTS = ['--body', '--title', '-b', '-t'];
+function messageSlots(toks) {
+  const out = [];
+  const u = unwrap(toks);
+  if (u.nested || u.where) return out;
+  const t = u.toks;
+  if (!t.length || t[0].dyn) return out;
+  const b = base(t[0].v);
+  let i;
+  let opts;
+  if (b === 'git') {
+    i = 1;
+    while (t[i] && !t[i].dyn && t[i].v.startsWith('-')) i += (t[i].v === '-C' || t[i].v === '-c') ? 2 : 1;
+    if (!t[i] || t[i].dyn || !GIT_MSG_SUBS.has(t[i].v)) return out;
+    opts = GIT_MSG_OPTS; i++;
+  } else if (b === 'gh') {
+    if (!t[1] || !t[2] || t[1].dyn || t[2].dyn || !['pr', 'issue'].includes(t[1].v) || !['create', 'edit'].includes(t[2].v)) return out;
+    opts = GH_MSG_OPTS; i = 3;
+  } else return out;
+  for (let k = i; k < t.length; k++) {
+    if (k > i && opts.includes(t[k - 1].v)) out.push({ tok: t[k], prefix: '' });
+    for (const o of opts) if (o.startsWith('--') && t[k].v.startsWith(`${o}=`)) out.push({ tok: t[k], prefix: `${o}=` });
+  }
+  return out;
+}
+
 const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', '{', '}', 'fi', 'done']);
 const ALLOWED_GIT_ENV = new Set(['GIT_PAGER', 'GIT_EDITOR', 'GIT_SEQUENCE_EDITOR', 'GIT_TERMINAL_PROMPT']);
 
@@ -397,6 +458,16 @@ function classifyPart(part, ctx, nested) {
   }
   if (INTERPRETERS.has(b) && ctx.mentioned) return deny(NESTED);
   if (toks.some((t) => t.ansi) && ctx.mentioned) return deny(NESTED);
+  const isData = DATA_CMDS.has(b) && (b !== 'sed' || sedIsData(toks.slice(1)));
+  if (!isData) {
+    const slots = new Set(messageSlots(part.toks).map((x) => x.tok));
+    for (const t of toks.slice(1)) {
+      if (slots.has(t)) continue;
+      const v = dequote(t.v);
+      if (base(v) === 'git' || /\bgit\b/i.test(v)) return deny(NESTED);
+      if (t.dyn && ctx.mentioned) return deny('shell expansions alongside git are not allowed for agents');
+    }
+  }
   if (anyHooksDir && (!READONLY_CMDS.has(b) || part.redirOut)) return deny('agents may only read .githooks');
   return ALLOW;
 }
@@ -414,17 +485,21 @@ function isDataHeredoc(x, cmd) {
 // `branch` is the current branch name, null for a detached HEAD, or a function returning either.
 export function classifyCommand(cmd, opts = {}) {
   if (typeof cmd !== 'string') return deny(UNPARSABLE);
-  if (!mentions(cmd) && !namesHooksDir(cmd)) return ALLOW;
+  if (!mentions(cmd) && !wordsNameHooksDir(cmd)) return ALLOW;
   const lexed = lex(cmd);
   if (lexed.error) return globalChecks(cmd) || deny(UNPARSABLE);
   // `$(cat <<'EOF' … EOF)` is data (a commit or PR message): leave its body out of every check.
-  const data = lexed.substs.filter((x) => isDataHeredoc(x, cmd));
+  const candidates = lexed.substs.filter((x) => isDataHeredoc(x, cmd));
+  const slotToks = lexed.parts.flatMap((p) => messageSlots(p.toks));
+  // bound by identity: the slot word must be exactly this substitution (plus an --opt= prefix)
+  const data = candidates.filter((x) => slotToks.some((sl) => sl.tok === x.tok && sl.tok.v === `${sl.prefix}${x.raw}`));
   let text = cmd;
   for (const x of [...data].sort((a, b) => b.start - a.start)) text = text.slice(0, x.start) + ' '.repeat(x.end - x.start) + text.slice(x.end);
   if (data.length) {
     for (const p of lexed.parts) for (const t of p.toks) for (const x of data) t.v = t.v.split(x.raw).join('');
   }
-  const mentioned = mentions(text);
+  // The interpreter, dynamic-name and expansion rules see the full text, data bodies included.
+  const mentioned = mentions(cmd);
   const g = globalChecks(text);
   if (g) return g;
   let cachedBranch;
@@ -575,7 +650,7 @@ export async function main() {
     if (mentions(raw)) block('guard: could not read the hook input, blocking');
     allow();
   }
-  if (!mentions(cmd) && !namesHooksDir(cmd)) allow(); // R15 fast path
+  if (!mentions(cmd) && !wordsNameHooksDir(cmd)) allow(); // R15 fast path
   const cwd = typeof input.cwd === 'string' && input.cwd ? input.cwd : process.cwd();
   let branchName;
   const branch = () => {

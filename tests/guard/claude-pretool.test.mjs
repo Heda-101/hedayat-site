@@ -73,6 +73,41 @@ const denied = [
   'git commit -m "$(cat <<EOF\n$(git push --force)\nEOF\n)"', 'git commit -m "$(cat <<EOF\n`git push`\nEOF\n)"',
   "git commit -m \"$(cat <<'EOF' /tmp/x\ngit\nEOF\n)\"", "git commit -m \"$(cat <<'EOF'\nmsg\nEOF\ngit push --force\n)\"",
   "git commit -m \"$(tac <<'EOF'\ngit\nEOF\n)\"", "git commit -m x && $(cat <<'EOF'\ngit push\nEOF\n)",
+  // fix round 2 (CRITICAL 1): a data heredoc outside a message slot is not data
+  "bash -c \"$(cat <<'EOF'\ngit push --no-verify --force origin main\nEOF\n)\"",
+  "eval \"$(cat <<'EOF'\ngit push --force\nEOF\n)\"",
+  "sh <<<\"$(cat <<'EOF'\ngit push --force\nEOF\n)\"",
+  "echo \"$(cat <<'EOF'\ngit push --force\nEOF\n)\" | sh",
+  "python3 -c \"$(cat <<'EOF'\nimport os; os.system('git push --force')\nEOF\n)\"",
+  "\"$(cat <<'EOF'\ngit\nEOF\n)\" push --force",
+  "xargs \"$(cat <<'EOF'\ngit\nEOF\n)\" push --force",
+  "xargs \"$(cat <<'EOF'\ngit\nEOF\n)\" push --force < /dev/null",
+  "x=\"$(cat <<'EOF'\ngit push --force\nEOF\n)\"; $x",
+  "rm -rf \"$(cat <<'EOF'\n.githooks\nEOF\n)\"",
+  "git log --grep \"$(cat <<'EOF'\ngit\nEOF\n)\"",
+  "git commit -m \"$(cat <<'EOF'\nmsg git\nEOF\n)\" --no-verify",
+  "git commit -m \"$(cat <<'EOF'\nmsg git\nEOF\n)\" -n",
+  "git commit -m \"$(cat <<'EOF'\nx\nEOF\n)\"; git push --force",
+  "gh pr list --search \"$(cat <<'EOF'\ngit\nEOF\n)\"",
+  "cat <<'EOF' | sh\ngit push --force\nEOF",
+  // fix round 2 self-review: an identical heredoc elsewhere must not borrow the message slot's exemption
+  "gh pr create --body \"$(cat <<'EOF'\ngit push --no-verify\nEOF\n)\"; eval \"$(cat <<'EOF'\ngit push --no-verify\nEOF\n)\"",
+  "gh pr create --body \"$(cat <<'EOF'\ngit push --no-verify\nEOF\n)\"; bash -c \"$(cat <<'EOF'\ngit push --no-verify\nEOF\n)\"",
+  "gh pr create --body=$(cat <<'EOF'\ngit push\nEOF\n) && eval \"$(cat <<'EOF'\ngit push\nEOF\n)\"",
+  "gh pr create --title t -b \"$(cat <<'EOF'\ngit push --force\nEOF\n)\" | sh",
+  // fix round 2 (IMPORTANT 2): only allow-listed data commands may take a git argument
+  'gtimeout 5 git push --force origin main', 'gtimeout 5 git commit -n -m x', 'entr git push --force',
+  'uv run git push --force', 'npm exec -- git push --force', 'yarn exec git push --force',
+  'direnv exec . git push --force', 'ssh localhost git push --force', 'op run -- git push --force',
+  'pkexec git push --force', 'nsenter git push --force', 'sem git push --force', 'watchexec git push --force',
+  'retry git push --force', 'sg staff git push --force', 'runuser -u me git push --force', 'echo x | gxargs git push --force',
+  'gnohup git push --force', 'pipx run git push', 'nix-shell --run git', 'hyperfine "git push --force"',
+  'npm test -- --grep git', 'sed "s/x/git push/e" f', 'sed -n "/git/w out" f', 'sed -f script.sed git',
+  'X=1 make git', 'node -e 1 git',
+  // fix round 2 (concern a): dot-led globs that can expand to .githooks
+  'rm -rf .g*', 'rm -rf .??thooks', 'rm -rf .?ithooks', 'mv .g?thooks /tmp/h', 'rm -rf .*hooks', 'rm -rf .*',
+  'rm -rf .[!.]*', 'chmod -x .*/pre-push', 'git rm -r .g*', 'git checkout HEAD -- .g*', 'rm -rf ./*/../.githoo*',
+  'rm -rf {.githoo*,x}', 'rm -rf .g*;ls', 'ls; rm -rf .g*',
 ];
 for (const c of denied) {
   test(`deny: ${c}`, () => {
@@ -93,6 +128,15 @@ const allowed = [
   // fix round 1: a git argument to a non-executing command is data
   'cat file | grep git', 'grep -n "git" README.md', 'rg git src', 'ls ~/.config/git', 'echo git',
   'ls *.md && git status', 'cat docs/*.md | grep git', 'ls .github/*',
+  // fix round 2: data-command allow-list and globs that cannot reach .githooks
+  'grep -rn git . | head', 'sed -n 1,5p .gitignore', 'sed -n "/git/p" README.md', 'sed "s/git/GIT/g" a.md',
+  'echo "use git" > notes.txt', 'printf "git\\n"', 'jq .git x.json', 'which git', 'man git', 'wc -l git.txt',
+  'ls .git*', 'ls .gith*', 'ls .*', 'git diff .githoo*', 'git status .g*', 'ls *.md', 'rm -f .eslintcache*',
+  'rm -rf node_modules/.cache/*', "git commit -F - <<'EOF'\nmsg git\nEOF",
+  "gh pr create --title \"fix git hooks\" --body \"$(cat <<'EOF'\nAdds git hooks and --no-verify denial.\nEOF\n)\"",
+  "gh issue edit 3 --body \"$(cat <<'EOF'\ngit hooks\nEOF\n)\"",
+  "git commit -m \"$(cat <<'EOF'\nx\nEOF\n)\" -m \"$(cat <<'EOF'\ngit body\nEOF\n)\"",
+  "git tag -a v1 -m \"$(cat <<'EOF'\ngit release\nEOF\n)\"",
   // fix round 1: the standard commit / PR heredoc form, even when the text mentions git or guard flags
   "git commit -m \"$(cat <<'EOF'\nfeat(guard): git hooks deny --no-verify and GUARD_TTY\n\nCo-Authored-By: X <x@example.invalid>\nEOF\n)\"",
   "gh pr create --title t --body \"$(cat <<'EOF'\nAdds git hooks (and core.hooksPath checks); don't skip them.\nEOF\n)\"",
@@ -388,6 +432,22 @@ test('settings command parses as bash and routes brace-spelled hook paths to Nod
   assert.equal(viaSettings(ROOT, bash('mv {.gi,}thooks /tmp/x', ROOT)).status, 2);
   assert.equal(viaSettings(ROOT, bash('mv .gi{t,x}hooks /tmp/x', ROOT)).status, 2);
   assert.equal(viaSettings(ROOT, bash('echo {a,b}', ROOT)).status, 0);
+});
+
+test('settings command: round-2 gaps are blocked end to end', () => {
+  const blocked = [
+    'rm -rf .g*', 'rm -rf .??thooks', 'mv .g?thooks /tmp/h', 'gtimeout 5 git commit -n -m x',
+    "bash -c \"$(cat <<'EOF'\ngit push --no-verify --force origin main\nEOF\n)\"",
+  ];
+  for (const c of blocked) assert.equal(viaSettings(ROOT, bash(c, ROOT)).status, 2, c);
+  assert.equal(viaSettings(ROOT, bash("git commit -m \"$(cat <<'EOF'\nfeat: git hooks\nEOF\n)\" --dry-run", ROOT)).status, 0);
+});
+
+test('settings command: dot-led globs reach Node even without Node 22 (fail closed), plain globs stay fast', () => {
+  const env = { PATH: '/usr/bin:/bin', NVM_DIR: '/nonexistent', HOME: tmp('guard-home-') };
+  assert.equal(viaSettings(ROOT, bash('rm -rf .g*', ROOT), env).status, 2);
+  assert.equal(viaSettings(ROOT, bash('ls *.md', ROOT), env).status, 0);
+  assert.equal(viaSettings(ROOT, bash('ls -la', ROOT), env).status, 0);
 });
 
 test('settings command: Node 22 missing is exit 2 for git, exit 0 otherwise', () => {

@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'in=$(cat); q=$(printf \"\\047\"); case \"$in\" in *[Gg][Ii][Tt]*|*GUARD_*|*\\\\*|*\"$q\"*|*[!:,[]{*|*[[]*) ;; *) exit 0 ;; esac; ( source \"$CLAUDE_PROJECT_DIR\"/scripts/guard/node22.sh && printf \"%s\" \"$in\" | node \"$CLAUDE_PROJECT_DIR\"/scripts/guard/claude-pretool.mjs ); [ $? -eq 0 ] && exit 0; exit 2'",
+            "command": "bash -c 'in=$(cat); q=$(printf \"\\047\"); re=\"(^|[[:space:]\\\";|&(<>=])[.][^[:space:]\\\"]*[*?]\"; case \"$in\" in *[Gg][Ii][Tt]*|*GUARD_*|*\\\\*|*\"$q\"*|*[!:,[]{*|*[[]*) ;; *) [[ \"$in\" =~ $re ]] || exit 0 ;; esac; ( source \"$CLAUDE_PROJECT_DIR\"/scripts/guard/node22.sh && printf \"%s\" \"$in\" | node \"$CLAUDE_PROJECT_DIR\"/scripts/guard/claude-pretool.mjs ); [ $? -eq 0 ] && exit 0; exit 2'",
             "timeout": 600
           }
         ]
