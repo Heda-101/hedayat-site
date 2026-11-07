@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { loadTerms, findTerms, GuardError } from './terms.mjs';
+import { newImagesInPush, confirmImages } from './images.mjs';
 import { collectStaged, collectPush, parsePushRefs, effectiveRevs } from './scope.mjs';
 
 const HINT = 'create ~/.config/hedayat-site/blocked-terms.txt with at least one term';
@@ -90,6 +91,14 @@ function main(argv) {
         blocked = runGitleaks(['git', `--log-opts=${range.revs.join(' ')}`], terms) || blocked;
       }
       blocked = scan(collectPush(refs), terms) || blocked;
+      if (!blocked) {
+        // A term scan cannot read pictures, so a human must confirm any new image (fails closed).
+        const images = newImagesInPush(refs);
+        if (images.length > 0) {
+          for (const p of images) process.stdout.write(`image needs confirmation: ${p}\n`);
+          blocked = !confirmImages(images, process.env.GUARD_TTY || '/dev/tty');
+        }
+      }
     }
   } catch (e) {
     fail(`scan failed, blocking (${e && e.code ? e.code : 'error'})`);

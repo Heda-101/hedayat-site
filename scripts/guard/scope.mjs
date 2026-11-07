@@ -4,7 +4,7 @@ const ZERO = /^0+$/;
 const MAX = 1024 * 1024 * 1024;
 const MARK = '\x01GUARD-COMMIT ';
 
-function git(args, cwd) {
+export function git(args, cwd) {
   return execFileSync('git', ['-c', 'core.quotepath=off', '-c', 'color.ui=never', '-c', 'color.diff=never',
     '-c', 'log.showRoot=true', '-c', 'diff.relative=false', ...args], {
     cwd, encoding: 'utf8', maxBuffer: MAX, stdio: ['ignore', 'pipe', 'pipe'],
