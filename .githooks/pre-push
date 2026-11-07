@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+GUARD_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$GUARD_ROOT/scripts/guard/node22.sh"
+exec node "$GUARD_ROOT/scripts/guard/check.mjs" push "$@"

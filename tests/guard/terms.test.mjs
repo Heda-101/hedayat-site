@@ -76,3 +76,14 @@ test('error messages never contain a term', () => {
     assert.doesNotMatch(e.message, /acme/i);
   } finally { cleanup(); }
 });
+
+test('word: term containing a space or punctuation is TERMS_INVALID naming only the line', () => {
+  const t = tmpTerms('# c\nword:Acme Corp\n');
+  try {
+    const e = codeOf(() => loadTerms(t.file));
+    assert.equal(e.code, 'TERMS_INVALID');
+    assert.match(e.message, /line 2/);
+    assert.doesNotMatch(e.message, /acme/i);
+    assert.match(e.message, /loose/);
+  } finally { t.cleanup(); }
+});

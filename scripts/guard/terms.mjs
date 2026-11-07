@@ -31,6 +31,10 @@ export function loadTerms(path) {
       mode = 'word';
       body = trimmed.slice(5).trim();
     }
+    if (mode === 'word' && /[^\p{L}\p{N}]/u.test(body.normalize('NFKC'))) {
+      throw new GuardError('TERMS_INVALID',
+        `blocked-terms line ${index}: a "word:" term must be letters and digits only; use a loose line for multi-word names`);
+    }
     const norm = normalize(body);
     if (norm === '') {
       throw new GuardError('TERMS_INVALID',
