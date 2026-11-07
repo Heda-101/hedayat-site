@@ -63,6 +63,16 @@ const denied = [
   'timeout 5 git push origin main', 'exec git push --mirror', 'awk \'BEGIN{system("git push")}\'',
   'git push origin feat/x;git push --all', 'git push origin feat/x|git push --all', 'git push origin :feat/x',
   'git push origin refs/heads/feat/x', 'git push --dry-run',
+  // fix round 1: globs and braces naming .githooks
+  'rm -rf .githoo* && git status', 'rm -rf .gith*', 'mv .githook? /tmp/h', 'chmod -R -x .gith*', 'git rm -r .githoo*',
+  'git checkout HEAD~5 -- .githoo*', 'git restore --source=HEAD~3 .githoo*', 'cp -r /tmp/x .githoo*', 'tee .githoo*/pre-push',
+  'rm -rf ./.gIthooks', 'rm -rf .gi{t,x}hooks', 'rm -rf .[g]ithooks', 'rm -rf .* && git status', 'git add .githoo[k]s',
+  // fix round 1: commands that execute their arguments still count as nested
+  'flock /tmp/l git push --force', 'caffeinate git push --force', 'setsid git push', 'xcrun git push --force',
+  // fix round 1: heredoc substitutions that are not plain data stay nested
+  'git commit -m "$(cat <<EOF\n$(git push --force)\nEOF\n)"', 'git commit -m "$(cat <<EOF\n`git push`\nEOF\n)"',
+  "git commit -m \"$(cat <<'EOF' /tmp/x\ngit\nEOF\n)\"", "git commit -m \"$(cat <<'EOF'\nmsg\nEOF\ngit push --force\n)\"",
+  "git commit -m \"$(tac <<'EOF'\ngit\nEOF\n)\"", "git commit -m x && $(cat <<'EOF'\ngit push\nEOF\n)",
 ];
 for (const c of denied) {
   test(`deny: ${c}`, () => {
@@ -80,6 +90,13 @@ const allowed = [
   'git fetch origin', 'git checkout -b feat/y', 'git branch --show-current', 'echo done && git status',
   'git remote -v', 'git fetch --prune origin', 'git commit -m "$(cat <<\'EOF\'\nfix: don\'t break\n\nbody\nEOF\n)"',
   'git commit -F /tmp/msg.txt', 'git status 2>&1 | tail -3',
+  // fix round 1: a git argument to a non-executing command is data
+  'cat file | grep git', 'grep -n "git" README.md', 'rg git src', 'ls ~/.config/git', 'echo git',
+  'ls *.md && git status', 'cat docs/*.md | grep git', 'ls .github/*',
+  // fix round 1: the standard commit / PR heredoc form, even when the text mentions git or guard flags
+  "git commit -m \"$(cat <<'EOF'\nfeat(guard): git hooks deny --no-verify and GUARD_TTY\n\nCo-Authored-By: X <x@example.invalid>\nEOF\n)\"",
+  "gh pr create --title t --body \"$(cat <<'EOF'\nAdds git hooks (and core.hooksPath checks); don't skip them.\nEOF\n)\"",
+  'git commit -m "$(cat <<EOF\nplain git message, no expansions\nEOF\n)"',
 ];
 for (const c of allowed) {
   test(`allow: ${c}`, () => assert.deepEqual(classifyCommand(c, B), { action: 'allow' }));
@@ -283,6 +300,23 @@ test('hook denies when git would push somewhere other than origin/<branch>', () 
   assert.match(r.out, /mirror/);
 });
 
+test('hook exits 2 when its internal deadline is reached', () => {
+  const dir = repo();
+  commitFile(dir, 'b.md', 'clean words\n');
+  const t0 = Date.now();
+  const r = hook(bash('git push', dir), { ai: 'slow', env: { GUARD_HOOK_DEADLINE_MS: '1500' } });
+  assert.equal(r.status, 2, r.out);
+  assert.match(r.out, /deadline/i);
+  assert.ok(Date.now() - t0 < 4500, 'hook should not wait for the slow reviewer');
+});
+
+test('hook deadline override can only shorten the 480 s default', () => {
+  const dir = repo();
+  commitFile(dir, 'b.md', 'clean words\n');
+  const r = hook(bash('git push', dir), { env: { GUARD_HOOK_DEADLINE_MS: '99999999' } });
+  assert.equal(r.status, 0, r.out);
+});
+
 test('hook uses the real current branch', () => {
   const dir = repo({ branch: 'feat/real' });
   commitFile(dir, 'b.md', 'clean words\n');
@@ -330,7 +364,7 @@ function settingsCommand() {
   const s = JSON.parse(fs.readFileSync(path.join(ROOT, '.claude/settings.json'), 'utf8'));
   const entry = s.hooks.PreToolUse.find((e) => e.matcher === 'Bash');
   assert.equal(entry.hooks[0].type, 'command');
-  assert.ok(entry.hooks[0].timeout >= 180);
+  assert.equal(entry.hooks[0].timeout, 600);
   return entry.hooks[0].command;
 }
 
@@ -346,6 +380,14 @@ test('settings command: deny is exit 2, ordinary command is exit 0', () => {
   assert.equal(viaSettings(ROOT, bash('git push --force', ROOT)).status, 2);
   assert.equal(viaSettings(ROOT, bash('git status', ROOT)).status, 0);
   assert.equal(viaSettings(ROOT, bash('npm test', ROOT)).status, 0);
+});
+
+test('settings command parses as bash and routes brace-spelled hook paths to Node', () => {
+  const syn = spawnSync('bash', ['-n', '-c', settingsCommand()], { encoding: 'utf8' });
+  assert.equal(syn.status, 0, syn.stderr);
+  assert.equal(viaSettings(ROOT, bash('mv {.gi,}thooks /tmp/x', ROOT)).status, 2);
+  assert.equal(viaSettings(ROOT, bash('mv .gi{t,x}hooks /tmp/x', ROOT)).status, 2);
+  assert.equal(viaSettings(ROOT, bash('echo {a,b}', ROOT)).status, 0);
 });
 
 test('settings command: Node 22 missing is exit 2 for git, exit 0 otherwise', () => {

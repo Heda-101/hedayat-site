@@ -5,7 +5,7 @@
 // treats it as non-blocking, so every error on a git-related command becomes exit 2.
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const NESTED = 'nested shell around git is not allowed for agents';
@@ -19,7 +19,57 @@ const Z = '0'.repeat(40);
 // Removes quoting so `g''it` or `--n"o-verify` still read as what the shell will run.
 const dequote = (s) => s.replace(/['"\\]/g, '');
 const mentionsRaw = (s) => /git/i.test(s) || /GUARD_/.test(s);
-export const mentions = (s) => mentionsRaw(s) || mentionsRaw(dequote(s));
+// Also drop brace/bracket glob syntax, so `.gi{t,x}hooks` or `.[g]ithooks` still reads as git.
+export const mentions = (s) => mentionsRaw(s) || mentionsRaw(dequote(s)) || mentionsRaw(s.replace(/['"\\{}[\],]/g, ''));
+
+// ---------- .githooks matching (literal, glob or brace) ----------
+
+function expandBraces(str, cap = 64) {
+  const m = /\{([^{}]*,[^{}]*)\}/.exec(str);
+  if (!m) return [str];
+  const res = [];
+  for (const alt of m[1].split(',')) {
+    for (const e of expandBraces(str.slice(0, m.index) + alt + str.slice(m.index + m[0].length), cap)) {
+      res.push(e);
+      if (res.length >= cap) return res;
+    }
+  }
+  return res;
+}
+
+function globToRe(seg) {
+  let re = '';
+  for (let i = 0; i < seg.length; i++) {
+    const c = seg[i];
+    if (c === '*') re += '[^/]*';
+    else if (c === '?') re += '[^/]';
+    else if (c === '[') {
+      const j = seg.indexOf(']', i + 2);
+      if (j === -1) { re += '\\['; continue; }
+      let body = seg.slice(i + 1, j);
+      if (body[0] === '!' || body[0] === '^') body = `^${body.slice(1)}`;
+      re += `[${body.replace(/\\/g, '\\\\')}]`;
+      i = j;
+    } else re += c.replace(/[.+^${}()|\\]/g, '\\$&');
+  }
+  return new RegExp(`^${re}$`, 'i');
+}
+
+// True when a word names .githooks literally, or could expand to it via a glob or braces.
+export function namesHooksDir(v) {
+  const d = dequote(v);
+  if (/\.githooks/i.test(d)) return true;
+  if (!/[*?[{]/.test(d)) return false;
+  for (const e of expandBraces(d)) {
+    if (/\.githooks/i.test(e)) return true;
+    for (const seg of e.split('/')) {
+      // shell globs never match a leading dot implicitly, so only dot-led segments can reach .githooks
+      if (seg[0] !== '.' || !/[*?[]/.test(seg)) continue;
+      try { if (globToRe(seg).test('.githooks')) return true; } catch { return true; }
+    }
+  }
+  return false;
+}
 
 const deny = (reason) => ({ action: 'deny', reason });
 const ALLOW = Object.freeze({ action: 'allow' });
@@ -31,20 +81,21 @@ const ALLOW = Object.freeze({ action: 'allow' });
 
 function lex(src, start = 0, depth = 0, out = { substs: [] }) {
   const parts = [];
-  let part = { toks: [], redirOut: false };
+  let part = { toks: [], redirOut: false, heredocs: [] };
   let cur = null; // { v, dyn }
   let pendingHeredocs = [];
   let i = start;
 
   const word = () => { if (!cur) cur = { v: '', dyn: false }; return cur; };
   const endTok = () => { if (cur) { part.toks.push(cur); cur = null; } };
-  const endPart = () => { endTok(); if (part.toks.length) parts.push(part); part = { toks: [], redirOut: false }; };
+  const endPart = () => { endTok(); if (part.toks.length) parts.push(part); part = { toks: [], redirOut: false, heredocs: [] }; };
 
   function subst(open) {
     // open is the index of the first char after `$(`, `<(` or `>(`
     const inner = lex(src, open, depth + 1, out);
     if (inner.error) return inner;
-    out.substs.push({ text: src.slice(open, inner.end), parts: inner.parts });
+    out.substs.push({ text: src.slice(open, inner.end), parts: inner.parts, src, raw: src.slice(open - 2, inner.end + 1),
+      start: open - 2, end: inner.end + 1, dollar: src[open - 2] === '$' });
     const w = word();
     w.v += src.slice(open - 2, inner.end + 1);
     w.dyn = true;
@@ -61,7 +112,7 @@ function lex(src, start = 0, depth = 0, out = { substs: [] }) {
     if (j >= src.length) return { error: true };
     const inner = lex(body, 0, 0, out);
     if (inner.error) return inner;
-    out.substs.push({ text: body, parts: inner.parts });
+    out.substs.push({ text: body, parts: inner.parts, backtick: true });
     const w = word();
     w.v += src.slice(open - 1, j + 1);
     w.dyn = true;
@@ -81,6 +132,7 @@ function lex(src, start = 0, depth = 0, out = { substs: [] }) {
         if ((h.strip ? line.replace(/^\t+/, '') : line) === h.delim) break;
         body += `${line}\n`;
       }
+      h.body = body;
       out.heredocs = (out.heredocs || '') + body;
     }
     pendingHeredocs = [];
@@ -159,9 +211,12 @@ function lex(src, start = 0, depth = 0, out = { substs: [] }) {
         while (src[j] === ' ' || src[j] === '\t') j++;
         let delim = '';
         while (j < src.length && !' \t\n;&|<>()'.includes(src[j])) delim += src[j++];
+        const quoted = delim !== dequote(delim);
         delim = dequote(delim);
         if (!delim) return { error: true };
-        pendingHeredocs.push({ delim, strip });
+        const h = { delim, strip, quoted, body: '' };
+        pendingHeredocs.push(h);
+        part.heredocs.push(h);
         i = j; continue;
       }
       while (j < src.length && (src[j] === '<' || src[j] === '>')) j++;
@@ -197,7 +252,9 @@ const GIT_GLOBAL_FLAGS = new Set(['-p', '-P', '--paginate', '--no-pager', '--no-
   '--help', '-h']);
 const INTERPRETERS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'csh', 'tcsh', 'eval', 'source', '.',
   'xargs', 'parallel', 'python', 'python2', 'python3', 'node', 'deno', 'bun', 'perl', 'ruby', 'php', 'lua', 'osascript',
-  'su', 'sudo', 'doas', 'watch', 'script', 'expect', 'awk', 'gawk', 'find', 'fd', 'trap', 'exec', 'alias']);
+  'su', 'sudo', 'doas', 'watch', 'script', 'expect', 'awk', 'gawk', 'find', 'fd', 'trap', 'exec', 'alias',
+  'flock', 'caffeinate', 'setsid', 'chroot', 'ionice', 'taskset', 'unbuffer', 'chronic', 'strace', 'ltrace', 'dtruss',
+  'arch', 'xcrun', 'npx', 'bunx', 'pnpx', 'tmux', 'screen']);
 const READONLY_CMDS = new Set(['cat', 'ls', 'head', 'tail', 'less', 'more', 'grep', 'egrep', 'fgrep', 'rg', 'wc', 'file',
   'stat', 'diff', 'bat', 'shellcheck', 'shasum', 'md5', 'od', 'xxd', 'hexdump', 'test', '[']);
 const WHERE_CMDS = new Set(['which', 'type', 'whereis', 'man', 'brew', 'apropos']);
@@ -286,7 +343,7 @@ function classifyGit(args, ctx) {
     || /^--(upload-pack|refmap)/.test(t.v))) {
     return deny('agents fetch only from origin without refspecs');
   }
-  if (rest.some((t) => /\.githooks/i.test(dequote(t.v))) && !GIT_READONLY.has(sub)) {
+  if (rest.some((t) => namesHooksDir(t.v)) && !GIT_READONLY.has(sub)) {
     return deny('agents may only read .githooks');
   }
   if (GIT_RUNS_COMMANDS.has(sub) && rest.some((t) => t.dyn || /git/i.test(dequote(t.v)))) return deny(NESTED);
@@ -332,7 +389,7 @@ function classifyPart(part, ctx, nested) {
   if (first.dyn) return ctx.mentioned ? deny('dynamic command names are not allowed alongside git') : ALLOW;
   const b = base(first.v);
   if (u.where) return ALLOW; // command -v git
-  const anyHooksDir = toks.some((t) => /\.githooks/i.test(dequote(t.v)));
+  const anyHooksDir = toks.some((t) => namesHooksDir(t.v));
   if (b === 'git') {
     if (nested) return deny(NESTED);
     if (part.redirOut && anyHooksDir) return deny('agents may only read .githooks');
@@ -340,21 +397,36 @@ function classifyPart(part, ctx, nested) {
   }
   if (INTERPRETERS.has(b) && ctx.mentioned) return deny(NESTED);
   if (toks.some((t) => t.ansi) && ctx.mentioned) return deny(NESTED);
-  if (!WHERE_CMDS.has(b) && toks.slice(1).some((t) => base(dequote(t.v)) === 'git')) return deny(NESTED);
   if (anyHooksDir && (!READONLY_CMDS.has(b) || part.redirOut)) return deny('agents may only read .githooks');
   return ALLOW;
+}
+
+// A `$(...)` whose only part is a bare `cat` reading one heredoc that cannot expand anything.
+function isDataHeredoc(x, cmd) {
+  if (x.backtick || !x.dollar || x.src !== cmd || x.parts.length !== 1) return false;
+  const p = x.parts[0];
+  if (p.redirOut || p.toks.length !== 1 || p.toks[0].dyn || p.toks[0].v !== 'cat' || p.heredocs.length !== 1) return false;
+  const h = p.heredocs[0];
+  return h.quoted || !/[$`\\]/.test(h.body);
 }
 
 // classifyCommand(cmd, { branch }) -> allow | deny(reason) | push(remote, branch).
 // `branch` is the current branch name, null for a detached HEAD, or a function returning either.
 export function classifyCommand(cmd, opts = {}) {
   if (typeof cmd !== 'string') return deny(UNPARSABLE);
-  const mentioned = mentions(cmd);
-  if (!mentioned && !/\.githooks/i.test(cmd)) return ALLOW;
-  const g = globalChecks(cmd);
-  if (g) return g;
+  if (!mentions(cmd) && !namesHooksDir(cmd)) return ALLOW;
   const lexed = lex(cmd);
-  if (lexed.error) return deny(UNPARSABLE);
+  if (lexed.error) return globalChecks(cmd) || deny(UNPARSABLE);
+  // `$(cat <<'EOF' … EOF)` is data (a commit or PR message): leave its body out of every check.
+  const data = lexed.substs.filter((x) => isDataHeredoc(x, cmd));
+  let text = cmd;
+  for (const x of [...data].sort((a, b) => b.start - a.start)) text = text.slice(0, x.start) + ' '.repeat(x.end - x.start) + text.slice(x.end);
+  if (data.length) {
+    for (const p of lexed.parts) for (const t of p.toks) for (const x of data) t.v = t.v.split(x.raw).join('');
+  }
+  const mentioned = mentions(text);
+  const g = globalChecks(text);
+  if (g) return g;
   let cachedBranch;
   const ctx = {
     mentioned,
@@ -366,6 +438,7 @@ export function classifyCommand(cmd, opts = {}) {
   };
   const all = lexed.parts.map((p) => ({ p, nested: false }));
   for (const s of lexed.substs) {
+    if (data.includes(s)) continue;
     if (mentions(s.text)) return deny(NESTED);
     for (const p of s.parts) all.push({ p, nested: true });
   }
@@ -462,6 +535,35 @@ async function pushFlow(cwd, branch) {
   allow();
 }
 
+const SELF = fileURLToPath(import.meta.url);
+const DEADLINE_MS = 480_000;
+
+// The push checks run in a child process so that a hard deadline can fire even while
+// gitleaks or git block that process synchronously. The deadline can only be shortened.
+function deadlineMs() {
+  const v = Number(process.env.GUARD_HOOK_DEADLINE_MS);
+  return Number.isFinite(v) && v > 0 ? Math.min(v, DEADLINE_MS) : DEADLINE_MS;
+}
+
+function runPushWorker(cwd, branch) {
+  return new Promise(() => {
+    const ms = deadlineMs();
+    const child = spawn(process.execPath, [SELF, '--push-worker', cwd, branch], {
+      stdio: ['ignore', 'inherit', 'inherit'], detached: true,
+    });
+    const timer = setTimeout(() => {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* gone */ } }
+      block(`guard: push checks hit the ${Math.round(ms / 1000)} s hook deadline, blocking`);
+    }, ms);
+    child.on('error', () => { clearTimeout(timer); block('guard: could not start the push checks, blocking'); });
+    child.on('exit', (code) => {
+      clearTimeout(timer);
+      if (code === 0) allow();
+      block(code === 2 ? [] : 'guard: push checks ended unexpectedly, blocking');
+    });
+  });
+}
+
 export async function main() {
   let raw = '';
   try { raw = fs.readFileSync(0, 'utf8'); } catch { raw = ''; }
@@ -473,7 +575,7 @@ export async function main() {
     if (mentions(raw)) block('guard: could not read the hook input, blocking');
     allow();
   }
-  if (!mentions(cmd) && !/\.githooks/i.test(cmd)) allow(); // R15 fast path
+  if (!mentions(cmd) && !namesHooksDir(cmd)) allow(); // R15 fast path
   const cwd = typeof input.cwd === 'string' && input.cwd ? input.cwd : process.cwd();
   let branchName;
   const branch = () => {
@@ -484,7 +586,7 @@ export async function main() {
   if (c.action === 'allow') allow();
   if (c.action === 'deny') block(`guard: ${c.reason}`);
   if (c.action !== 'push') block('guard: unexpected classification, blocking');
-  await pushFlow(cwd, c.branch);
+  await runPushWorker(cwd, c.branch);
   block('guard: push flow ended unexpectedly, blocking');
 }
 
@@ -494,8 +596,12 @@ function crash() {
 }
 
 const invoked = (() => { try { return fs.realpathSync(process.argv[1]); } catch { return null; } })();
-if (invoked === fs.realpathSync(fileURLToPath(import.meta.url))) {
+if (invoked === fs.realpathSync(SELF)) {
   process.on('uncaughtException', crash);
   process.on('unhandledRejection', crash);
-  try { main().catch(crash); } catch { crash(); }
+  const worker = process.argv[2] === '--push-worker';
+  try {
+    (worker ? pushFlow(process.argv[3], process.argv[4]).then(() => block('guard: push flow ended unexpectedly, blocking'))
+      : main()).catch(crash);
+  } catch { crash(); }
 }
