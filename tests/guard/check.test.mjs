@@ -101,10 +101,10 @@ test('message: term in commit message blocks', () => {
   assert.doesNotMatch(r.out, /acme/i);
 });
 
-test('message: clean message passes, and comment lines are ignored', () => {
+test('message: clean message passes', () => {
   const dir = mkRepo();
   const f = path.join(dir, 'MSG');
-  fs.writeFileSync(f, 'fix things\n\n# Acme Corp in a git comment\n');
+  fs.writeFileSync(f, 'fix things\n\n# a harmless comment\n');
   assert.equal(check(dir, ['message', f]).status, 0);
 });
 
@@ -277,4 +277,93 @@ test('wiring: real git push runs the pre-push hook', () => {
   git(dir, ['commit', '-q', '-m', 'q'], { env });
   r = git(dir, ['push', '-q', 'origin', 'feature'], { env, allowFail: true });
   assert.equal(r.status, 0, r.stdout + r.stderr);
+});
+
+// ---- fix round 1: silent-pass gaps ----
+const FAKE_KEY = 'AKIA' + 'IOSFODNN7' + 'EXAMPLX';
+
+test('push: unknown remote sha still runs gitleaks on the fallback range', () => {
+  const dir = mkRepoWithOrigin();
+  fs.writeFileSync(path.join(dir, 'k.env'),
+    `aws_access_key_id = ${FAKE_KEY}\naws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n`);
+  git(dir, ['add', 'k.env']);
+  git(dir, ['commit', '-q', '-m', 'keys']);
+  const r = check(dir, ['push'], { input: pushLine(dir, 'main', 'f'.repeat(40)) });
+  assert.equal(r.status, 1);
+  assert.doesNotMatch(r.out, new RegExp(FAKE_KEY));
+});
+
+test('staged: file with a NUL byte is still term-scanned', () => {
+  const dir = mkRepo();
+  fs.writeFileSync(path.join(dir, 'bin.dat'), Buffer.from('head\0\nAcme Corp\n'));
+  git(dir, ['add', 'bin.dat']);
+  const r = check(dir, ['staged']);
+  assert.equal(r.status, 1);
+  assert.match(r.out, /blocked-term #1 at bin\.dat:2/);
+});
+
+test('staged and push: a -diff gitattribute does not hide content', () => {
+  const dir = mkRepoWithOrigin();
+  const base = rev(dir, 'main');
+  fs.writeFileSync(path.join(dir, '.gitattributes'), '*.md -diff\n');
+  fs.writeFileSync(path.join(dir, 'h.md'), 'Acme Corp\n');
+  git(dir, ['add', 'h.md']);
+  assert.equal(check(dir, ['staged']).status, 1);
+  git(dir, ['add', '.gitattributes']);
+  git(dir, ['commit', '-q', '-m', 'h']);
+  const r = check(dir, ['push'], { input: pushLine(dir, 'main', base) });
+  assert.equal(r.status, 1);
+  assert.match(r.out, /blocked-term #1 at h\.md:1/);
+});
+
+test('user git color config does not hide content', () => {
+  const dir = mkRepo();
+  git(dir, ['config', 'color.ui', 'always']);
+  git(dir, ['config', 'color.diff', 'always']);
+  fs.writeFileSync(path.join(dir, 'c.md'), 'Acme Corp\n');
+  git(dir, ['add', 'c.md']);
+  assert.equal(check(dir, ['staged']).status, 1);
+  git(dir, ['commit', '-q', '-m', 'c']);
+  const r = check(dir, ['push'], { input: pushLine(dir, 'main') });
+  assert.equal(r.status, 1);
+  assert.match(r.out, /blocked-term #1 at c\.md:1/);
+});
+
+test('log.showRoot=false does not hide the root commit', () => {
+  const dir = mkRepo();
+  git(dir, ['config', 'log.showRoot', 'false']);
+  fs.writeFileSync(path.join(dir, 'r.md'), 'Acme Corp\n');
+  git(dir, ['add', 'r.md']);
+  git(dir, ['commit', '-q', '-m', 'root']);
+  const r = check(dir, ['push'], { input: pushLine(dir, 'main') });
+  assert.equal(r.status, 1);
+  assert.match(r.out, /blocked-term #1 at r\.md:1/);
+});
+
+test('message: a # line is scanned (git keeps it with -m / verbatim)', () => {
+  const dir = mkRepo();
+  const f = path.join(dir, 'MSG');
+  fs.writeFileSync(f, 'fix\n\n#Acme Corp\n');
+  const r = check(dir, ['message', f]);
+  assert.equal(r.status, 1);
+  assert.doesNotMatch(r.out, /acme/i);
+});
+
+test('push: annotated tag message and commit author are scanned', () => {
+  const dir = mkRepoWithOrigin();
+  git(dir, ['tag', '-a', 'v1', '-m', 'release for Acme Corp']);
+  const tagSha = git(dir, ['rev-parse', 'v1']).stdout.trim();
+  let r = check(dir, ['push'], { input: `refs/tags/v1 ${tagSha} refs/tags/v1 ${Z}\n` });
+  assert.equal(r.status, 1);
+  assert.match(r.out, /blocked-term #1 at tag/);
+  assert.doesNotMatch(r.out, /acme/i);
+
+  const dir2 = mkRepoWithOrigin();
+  const base = rev(dir2, 'main');
+  fs.writeFileSync(path.join(dir2, 'z.md'), 'fine\n');
+  git(dir2, ['add', 'z.md']);
+  git(dir2, ['commit', '-q', '-m', 'z', '--author', 'Acme Corp <x@example.invalid>']);
+  r = check(dir2, ['push'], { input: pushLine(dir2, 'main', base) });
+  assert.equal(r.status, 1);
+  assert.match(r.out, /blocked-term #1 at commit [0-9a-f]+ author/);
 });

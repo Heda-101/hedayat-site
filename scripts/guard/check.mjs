@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { loadTerms, findTerms, GuardError } from './terms.mjs';
-import { collectStaged, collectPush, parsePushRefs, pushRange } from './scope.mjs';
+import { collectStaged, collectPush, parsePushRefs, effectiveRevs } from './scope.mjs';
 
 const HINT = 'create ~/.config/hedayat-site/blocked-terms.txt with at least one term';
 
@@ -80,12 +80,12 @@ function main(argv) {
       blocked = scan(collectStaged(), terms) || blocked;
     } else if (mode === 'message') {
       if (!arg) fail('message mode needs the commit message file');
-      const text = fs.readFileSync(arg, 'utf8').split(/\r?\n/).filter((l) => !l.startsWith('#')).join('\n');
+      const text = fs.readFileSync(arg, 'utf8');
       blocked = scan([{ where: 'commit message', text }], terms);
     } else {
       const refs = parsePushRefs(fs.readFileSync(0, 'utf8'));
       for (const ref of refs) {
-        const range = pushRange(ref);
+        const range = effectiveRevs(ref);
         if (range.kind === 'delete') continue;
         blocked = runGitleaks(['git', `--log-opts=${range.revs.join(' ')}`], terms) || blocked;
       }

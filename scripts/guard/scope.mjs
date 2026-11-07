@@ -5,7 +5,8 @@ const MAX = 1024 * 1024 * 1024;
 const MARK = '\x01GUARD-COMMIT ';
 
 function git(args, cwd) {
-  return execFileSync('git', ['-c', 'core.quotepath=off', ...args], {
+  return execFileSync('git', ['-c', 'core.quotepath=off', '-c', 'color.ui=never', '-c', 'color.diff=never',
+    '-c', 'log.showRoot=true', '-c', 'diff.relative=false', ...args], {
     cwd, encoding: 'utf8', maxBuffer: MAX, stdio: ['ignore', 'pipe', 'pipe'],
   });
 }
@@ -68,20 +69,24 @@ function addedItems(diff) {
 }
 
 export function collectStaged(cwd = process.cwd()) {
-  const diff = git(['diff', '--cached', '-U0', '-M', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/'], cwd);
+  const diff = git(['diff', '--cached', '-U0', '-M', '--text', '--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/'], cwd);
   const names = git(['diff', '--cached', '--name-only', '-M', '-z'], cwd);
   return [...addedItems(diff), ...pathItems(names)];
 }
 
-function logRange(revs, cwd) {
-  try {
-    return collectRange(revs, cwd);
-  } catch (e) {
-    // remote tip unknown locally (e.g. forced update): fall back to commits on no remote
-    const m = revs.length === 1 && /^([0-9a-f]+)\.\.([0-9a-f]+)$/i.exec(revs[0]);
-    if (!m) throw e;
-    return collectRange([m[2], '--not', '--remotes'], cwd);
+function isCommit(sha, cwd) {
+  try { git(['cat-file', '-e', `${sha}^{commit}`], cwd); return true; } catch { return false; }
+}
+
+// Revs to scan for a push ref; shared by gitleaks and the term scan so both see the same commits.
+// If the remote tip is unknown locally, fall back to commits on no remote.
+export function effectiveRevs(ref, cwd = process.cwd()) {
+  const range = pushRange(ref);
+  if (range.kind === 'delete') return range;
+  if (range.revs.length === 1 && !isCommit(ref.remoteSha, cwd)) {
+    return { kind: 'range', revs: [ref.localSha, '--not', '--remotes'] };
   }
+  return range;
 }
 
 function collectRange(revs, cwd) {
@@ -89,11 +94,16 @@ function collectRange(revs, cwd) {
   const messages = git(['log', '--format=%H%x00%B%x00', ...revs], cwd).split('\0');
   for (let i = 0; i + 1 < messages.length; i += 2) {
     const sha = messages[i].trim();
-    if (sha) items.push({ where: `commit ${sha.slice(0, 7)} message`, text: messages[i + 1] });
+    if (!sha) continue;
+    items.push({ where: `commit ${sha.slice(0, 7)} message`, text: messages[i + 1] });
+    // identity lines (name and email) live in the raw commit header
+    const header = git(['cat-file', 'commit', sha], cwd).split('\n\n')[0]
+      .split('\n').filter((l) => /^(author|committer) /.test(l)).join('\n');
+    items.push({ where: `commit ${sha.slice(0, 7)} author`, text: header });
   }
   const names = git(['log', '-m', '-M', '--name-only', '-z', '--format=', ...revs], cwd);
   items.push(...pathItems(names));
-  const log = git(['log', '-m', '-p', '-U0', '-M', '--no-ext-diff', '--no-textconv',
+  const log = git(['log', '-m', '-p', '-U0', '-M', '--text', '--no-color', '--no-ext-diff', '--no-textconv',
     '--src-prefix=a/', '--dst-prefix=b/', `--format=${MARK}%h`, ...revs], cwd);
   for (const chunk of log.split(MARK).slice(1)) {
     const nl = chunk.indexOf('\n');
@@ -106,12 +116,17 @@ function collectRange(revs, cwd) {
 export function collectPush(refs, cwd = process.cwd()) {
   const items = [];
   for (const ref of refs) {
-    const range = pushRange(ref);
+    const range = effectiveRevs(ref, cwd);
     if (range.kind === 'delete') continue;
     for (const name of new Set([ref.remoteRef, ref.localRef])) {
       if (name) items.push({ where: `branch ${name}`, text: name });
     }
-    items.push(...logRange(range.revs, cwd));
+    let type = '';
+    try { type = git(['cat-file', '-t', ref.localSha], cwd).trim(); } catch { /* scan fails below */ }
+    if (type === 'tag') {
+      items.push({ where: `tag ${ref.localSha.slice(0, 7)} annotation`, text: git(['cat-file', 'tag', ref.localSha], cwd) });
+    }
+    items.push(...collectRange(range.revs, cwd));
   }
   return items;
 }
