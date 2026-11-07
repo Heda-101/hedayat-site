@@ -543,3 +543,59 @@ test('settings command: a Node crash becomes exit 2', () => {
   fs.writeFileSync(path.join(proj, 'scripts/guard/claude-pretool.mjs'), 'process.exit(1);\n');
   assert.equal(viaSettings(proj, bash('git status', proj)).status, 2);
 });
+
+// ---------- I5: PR and issue text gets the blocked-term scan ----------
+
+test('I5: a blocked term in gh PR or issue text is denied with a masked location', () => {
+  const dir = tmp('guard-gh-');
+  fs.writeFileSync(path.join(dir, 'notes.md'), 'line one\nwe met Acme Corp\n');
+  fs.writeFileSync(path.join(dir, 'clean.md'), 'nothing to see\n');
+  const cases = [
+    ['gh pr create --title "Add guard" --body "we met Acme Corp"', '--body'],
+    ['gh pr create -t "Acme Corp launch" -b ok', '--title'],
+    ['gh pr edit 4 --title=AcmeCorp', '--title'],
+    ['gh issue create -t ok -bAcmeCorp', '--body'],
+    ['gh issue comment 3 --body-file notes.md', '--body-file'],
+    ['gh pr comment 3 -F notes.md', '--body-file'],
+    ["gh pr create --title t --body \"$(cat <<'EOF'\nsummary\nAcme Corp\nEOF\n)\"", '--body'],
+    ['npm test && gh pr create --title ok --body "Acme Corp"', '--body'],
+  ];
+  for (const [c, opt] of cases) {
+    const r = hook(bash(c, dir));
+    assert.equal(r.status, 2, `${c}: ${r.out}`);
+    assert.match(r.out, new RegExp(`blocked-term #1 in ${opt}`), c);
+    assert.doesNotMatch(r.out, /acme/i, c);
+  }
+});
+
+test('I5: clean gh text and other gh commands pass', () => {
+  const dir = tmp('guard-gh-');
+  fs.writeFileSync(path.join(dir, 'clean.md'), 'nothing to see\n');
+  for (const c of ['gh pr create --title "Add guard" --body "clean words"', 'gh pr list', 'gh issue view 3',
+    "gh pr create --title t --body \"$(cat <<'EOF'\nclean words\nEOF\n)\"", 'gh pr comment 3 -F clean.md',
+    'gh pr create --fill', 'echo high and right']) {
+    const r = hook(bash(c, dir));
+    assert.equal(r.status, 0, `${c}: ${r.out}`);
+  }
+});
+
+test('I5: gh text that cannot be checked is denied', () => {
+  const dir = tmp('guard-gh-');
+  for (const c of ['gh pr create --title t --body "$BODY"', 'gh pr create --title t --body-file -',
+    'gh pr comment 3 -F missing.md', 'gh pr create --title "$(date)" --body x']) {
+    const r = hook(bash(c, dir));
+    assert.equal(r.status, 2, `${c}: ${r.out}`);
+  }
+  const r = hook(bash('gh pr create --title ok --body ok', dir), { terms: path.join(tmp('guard-none-'), 'nope.txt') });
+  assert.equal(r.status, 2, r.out);
+  assert.match(r.out, /blocked-terms/);
+});
+
+test('I5: settings command routes unquoted gh commands to Node', () => {
+  const dir = tmp('guard-gh-');
+  const r = viaSettings(ROOT, bash('gh pr create -t AcmeCorp -b ok', dir));
+  assert.equal(r.status, 2, r.out);
+  assert.match(r.out, /blocked-term #1 in --title/);
+  assert.equal(viaSettings(ROOT, bash('gh pr create -t fine -b ok', dir)).status, 0);
+  assert.equal(viaSettings(ROOT, bash('echo high', dir)).status, 0);
+});

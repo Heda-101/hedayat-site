@@ -548,6 +548,75 @@ export function classifyCommand(cmd, opts = {}) {
   return push || ALLOW;
 }
 
+// ---------- I5: PR and issue text ----------
+// gh pr|issue text options get the same blocked-term scan as commits (spec §5).
+const GH_TEXT_SUBS = { pr: ['create', 'edit', 'comment', 'review', 'merge'], issue: ['create', 'edit', 'comment'] };
+const GH_TEXT_OPTS = { '--title': '--title', '-t': '--title', '--body': '--body', '-b': '--body',
+  '--body-file': '--body-file', '-F': '--body-file', '--subject': '--subject' };
+export const mentionsGh = (s) => /\bgh\b/i.test(s);
+
+// Returns null when no gh pr|issue text command is present, else { error } or
+// { items: [{ opt, text } | { opt, file }] } with opt as its long name.
+export function ghTextItems(cmd) {
+  const lexed = lex(cmd);
+  if (lexed.error) return { error: UNPARSABLE };
+  const parts = [...lexed.parts, ...lexed.substs.flatMap((x) => x.parts)];
+  const items = [];
+  let found = false;
+  for (const p of parts) {
+    const t = unwrap(p.toks).toks;
+    if (!t.length || t[0].dyn || base(t[0].v).toLowerCase() !== 'gh') continue;
+    if ((t[1] && t[1].dyn) || (t[2] && t[2].dyn)) return { error: 'gh commands with shell expansions in the command name are not allowed for agents' };
+    const subs = t[1] && GH_TEXT_SUBS[t[1].v];
+    if (!subs || !t[2] || !subs.includes(t[2].v)) continue;
+    found = true;
+    for (let k = 3; k < t.length; k++) {
+      const tok = t[k];
+      let opt;
+      let val;
+      let prefix = '';
+      if (!tok.dyn && Object.hasOwn(GH_TEXT_OPTS, tok.v)) {
+        opt = GH_TEXT_OPTS[tok.v];
+        val = t[++k];
+        if (!val) break;
+      } else {
+        const m = /^(--title|--body-file|--body|--subject)=/.exec(tok.v) || /^-[tbF](?=.)/.exec(tok.v);
+        if (!m) continue;
+        opt = GH_TEXT_OPTS[m[1] || m[0]];
+        prefix = m[0];
+        val = tok;
+      }
+      const data = lexed.substs.find((x) => x.tok === val && val.v === `${prefix}${x.raw}` && isDataHeredoc(x, cmd));
+      let text;
+      if (data) text = data.parts[0].heredocs[0].body;
+      else if (val.dyn) return { error: `cannot check ${opt} built from shell expansions; use literal text, a quoted heredoc or --body-file` };
+      else text = val.v.slice(prefix.length);
+      items.push(opt === '--body-file' ? { opt, file: text } : { opt, text });
+    }
+  }
+  return found ? { items } : null;
+}
+
+// Blocks (exit 2) on any blocked term in the gh text, on a missing terms file, or on a file
+// that cannot be read. Output names only the option, never the text.
+async function scanGhText(items, cwd) {
+  const { loadGuardTerms } = await import('./check.mjs');
+  const { findTerms } = await import('./terms.mjs');
+  let terms;
+  try { terms = loadGuardTerms(); } catch (e) { block(`guard: ${e.message}`); }
+  const lines = [];
+  for (const it of items) {
+    let text = it.text;
+    if (it.file !== undefined) {
+      if (it.file === '-' || it.file === '') block('guard: cannot check --body-file from stdin; write the text to a file first');
+      try { text = fs.readFileSync(path.resolve(cwd, it.file), 'utf8'); }
+      catch { block('guard: could not read the --body-file to check it, blocking'); }
+    }
+    for (const n of new Set(findTerms(text, terms).map((h) => h.termIndex))) lines.push(`guard: blocked-term #${n} in ${it.opt}`);
+  }
+  if (lines.length) block([...lines, 'guard: PR and issue text follows the same rules as commits']);
+}
+
 // ---------- hook entry point ----------
 
 function say(fd, lines) {
@@ -669,8 +738,13 @@ export async function main() {
     if (mentions(raw)) block('guard: could not read the hook input, blocking');
     allow();
   }
-  if (!mentions(cmd) && !wordsNameHooksDir(cmd)) allow(); // R15 fast path
   const cwd = typeof input.cwd === 'string' && input.cwd ? input.cwd : process.cwd();
+  if (mentionsGh(cmd)) {
+    const g = ghTextItems(cmd);
+    if (g && g.error) block(`guard: ${g.error}`);
+    if (g) await scanGhText(g.items, cwd);
+  }
+  if (!mentions(cmd) && !wordsNameHooksDir(cmd)) allow(); // R15 fast path
   let branchName;
   const branch = () => {
     if (branchName === undefined) branchName = currentBranch(cwd);
