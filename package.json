@@ -6,7 +6,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "test:guard": "node --test tests/guard/",
+    "test:guard": "node --test \"tests/guard/**/*.test.mjs\"",
     "guard:selftest": "bash scripts/guard/selftest.sh"
   }
 }
