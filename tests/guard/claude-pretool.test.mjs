@@ -407,8 +407,26 @@ test('R18b: intact hooks let state-changing git through', () => {
   }
 });
 
-test('R18b: this repository itself passes the integrity check', () => {
-  assert.equal(hook(bash('git commit --dry-run -m x', ROOT)).status, 0);
+// A temp repo holding this repository's real guard files (not stubs) with the hooks set up the
+// way setup.sh does, so tests never depend on how the checkout running them is configured.
+function guardCopy() {
+  const dir = tmp('guard-copy-');
+  gitIn(dir, ['init', '-q', '-b', 'main']);
+  gitIn(dir, ['config', 'user.name', 'Test']);
+  gitIn(dir, ['config', 'user.email', 'test@example.invalid']);
+  gitIn(dir, ['config', 'commit.gpgsign', 'false']);
+  fs.cpSync(path.join(ROOT, '.githooks'), path.join(dir, '.githooks'), { recursive: true });
+  fs.cpSync(path.join(ROOT, 'scripts/guard'), path.join(dir, 'scripts/guard'), { recursive: true });
+  fs.cpSync(path.join(ROOT, '.claude'), path.join(dir, '.claude'), { recursive: true });
+  gitIn(dir, ['config', 'core.hooksPath', '.githooks']);
+  fs.writeFileSync(path.join(dir, 'a.md'), 'base\n');
+  gitIn(dir, ['add', 'a.md']);
+  return dir;
+}
+
+test('R18b: this repository\'s real guard files pass the integrity check', () => {
+  const dir = guardCopy();
+  assert.equal(hook(bash('git commit --dry-run -m x', dir)).status, 0);
 });
 
 test('hook uses the real current branch', () => {
@@ -490,7 +508,8 @@ test('settings command: round-2 gaps are blocked end to end', () => {
     "bash -c \"$(cat <<'EOF'\ngit push --no-verify --force origin main\nEOF\n)\"",
   ];
   for (const c of blocked) assert.equal(viaSettings(ROOT, bash(c, ROOT)).status, 2, c);
-  assert.equal(viaSettings(ROOT, bash("git commit -m \"$(cat <<'EOF'\nfeat: git hooks\nEOF\n)\" --dry-run", ROOT)).status, 0);
+  const dir = guardCopy();
+  assert.equal(viaSettings(dir, bash("git commit -m \"$(cat <<'EOF'\nfeat: git hooks\nEOF\n)\" --dry-run", dir)).status, 0);
 });
 
 test('settings command: dot-led globs reach Node even without Node 22 (fail closed), plain globs stay fast', () => {
