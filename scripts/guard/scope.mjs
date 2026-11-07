@@ -130,3 +130,24 @@ export function collectPush(refs, cwd = process.cwd()) {
   }
   return items;
 }
+
+// Input for the AI confidentiality review of a push: full diffs and messages of the same
+// effective revs the other checks scan, annotated-tag text, and the binary paths.
+// Shared by the pre-push hook (agent shells) and the Claude Code hook. Throws on git errors.
+export function reviewInputForPush(refs, cwd = process.cwd()) {
+  let diff = '';
+  const binaryPaths = [];
+  for (const ref of refs) {
+    const range = effectiveRevs(ref, cwd);
+    if (range.kind === 'delete') continue;
+    if (git(['cat-file', '-t', ref.localSha], cwd).trim() === 'tag') diff += git(['cat-file', 'tag', ref.localSha], cwd);
+    diff += git(['log', '-p', '--text', '-m', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames',
+      '--pretty=fuller', ...range.revs], cwd);
+    const numstat = git(['log', '-m', '--numstat', '--no-renames', '--format=', '-z', ...range.revs], cwd);
+    for (const entry of numstat.split('\0')) {
+      const m = /^\n*(-|\d+)\t(-|\d+)\t([\s\S]*)$/.exec(entry);
+      if (m && m[1] === '-' && m[2] === '-' && !binaryPaths.includes(m[3])) binaryPaths.push(m[3]);
+    }
+  }
+  return { diff, binaryPaths };
+}

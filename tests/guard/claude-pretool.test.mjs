@@ -108,6 +108,13 @@ const denied = [
   'rm -rf .g*', 'rm -rf .??thooks', 'rm -rf .?ithooks', 'mv .g?thooks /tmp/h', 'rm -rf .*hooks', 'rm -rf .*',
   'rm -rf .[!.]*', 'chmod -x .*/pre-push', 'git rm -r .g*', 'git checkout HEAD -- .g*', 'rm -rf ./*/../.githoo*',
   'rm -rf {.githoo*,x}', 'rm -rf .g*;ls', 'ls; rm -rf .g*',
+  // fix round 3 (A): non-leading dot globs
+  'rm -rf scripts/../.g*', 'rm -rf /Users/x/hedayat-site/.g*', 'rm -rf ~/Documents/hedayat-site/.g*',
+  // fix round 3 (B): stdin-fed execution and interpreter names as arguments
+  'echo "git push --force origin main" | gtimeout 5 sh', 'echo "git push" | ssh localhost',
+  "cat <<'EOF' | gtimeout 5 bash\ngit push --force origin main\nEOF", 'git log | gtimeout 5 bash',
+  'gtimeout 5 sh script.sh && git status', 'gtimeout 5 bash < s.sh && git status', 'ssh localhost ls && git status',
+  'printf "git push" | npx zx', "gtimeout 5 python3 <<<'git push'", 'echo git | retry -- bash',
 ];
 for (const c of denied) {
   test(`deny: ${c}`, () => {
@@ -137,6 +144,9 @@ const allowed = [
   "gh issue edit 3 --body \"$(cat <<'EOF'\ngit hooks\nEOF\n)\"",
   "git commit -m \"$(cat <<'EOF'\nx\nEOF\n)\" -m \"$(cat <<'EOF'\ngit body\nEOF\n)\"",
   "git tag -a v1 -m \"$(cat <<'EOF'\ngit release\nEOF\n)\"",
+  // fix round 3: pipes into data commands stay fine
+  'git log --oneline | head -5', 'git status | grep modified', "cat <<'EOF' | grep git\ngit x\nEOF", 'git diff | wc -l',
+  'npm test 2>&1 | tail -5 && git status',
   // fix round 1: the standard commit / PR heredoc form, even when the text mentions git or guard flags
   "git commit -m \"$(cat <<'EOF'\nfeat(guard): git hooks deny --no-verify and GUARD_TTY\n\nCo-Authored-By: X <x@example.invalid>\nEOF\n)\"",
   "gh pr create --title t --body \"$(cat <<'EOF'\nAdds git hooks (and core.hooksPath checks); don't skip them.\nEOF\n)\"",
@@ -207,7 +217,15 @@ function repo({ branch = 'feat/x' } = {}) {
   gitIn(dir, ['config', 'commit.gpgsign', 'false']);
   gitIn(dir, ['remote', 'add', 'origin', origin]);
   fs.writeFileSync(path.join(dir, 'a.md'), 'base\n');
-  gitIn(dir, ['add', 'a.md']);
+  // intact guard hooks (R18b): stub hooks, a stub check.mjs and core.hooksPath=.githooks
+  fs.mkdirSync(path.join(dir, '.githooks'));
+  for (const h of ['pre-commit', 'commit-msg', 'pre-push']) {
+    fs.writeFileSync(path.join(dir, '.githooks', h), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  }
+  fs.mkdirSync(path.join(dir, 'scripts/guard'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'scripts/guard/check.mjs'), '// stub\n');
+  gitIn(dir, ['config', 'core.hooksPath', '.githooks']);
+  gitIn(dir, ['add', 'a.md', '.githooks', 'scripts']);
   gitIn(dir, ['commit', '-q', '-m', 'base']);
   gitIn(dir, ['push', '-q', 'origin', 'main']);
   gitIn(dir, ['fetch', '-q', 'origin']);
@@ -361,6 +379,46 @@ test('hook deadline override can only shorten the 480 s default', () => {
   assert.equal(r.status, 0, r.out);
 });
 
+// ---------- R18b: integrity check before state-changing git ----------
+
+const INTEGRITY = /guard hooks are missing or disabled; Hedayat must restore them \(bash scripts\/setup\.sh\)/;
+const breakers = {
+  'a hook file is removed': (dir) => fs.unlinkSync(path.join(dir, '.githooks/pre-push')),
+  'core.hooksPath is unset': (dir) => gitIn(dir, ['config', '--unset', 'core.hooksPath']),
+  'core.hooksPath points elsewhere': (dir) => gitIn(dir, ['config', 'core.hooksPath', '/dev/null']),
+  'a hook is not executable': (dir) => fs.chmodSync(path.join(dir, '.githooks/pre-commit'), 0o644),
+  'the hooks folder is gone': (dir) => fs.rmSync(path.join(dir, '.githooks'), { recursive: true }),
+  'check.mjs is missing': (dir) => fs.unlinkSync(path.join(dir, 'scripts/guard/check.mjs')),
+};
+for (const [name, breakIt] of Object.entries(breakers)) {
+  test(`R18b: when ${name}, state-changing git is denied and read-only git is allowed`, () => {
+    const dir = repo();
+    breakIt(dir);
+    for (const c of ['git commit -m x', 'git push', 'git reset --hard', 'git checkout -b y', 'git tag v1',
+      'git merge main', 'git rebase main', 'git cherry-pick HEAD', 'git switch main', 'git restore a.md',
+      'git am x.patch', 'git apply x.patch', 'npm test && git commit -m x']) {
+      const r = hook(bash(c, dir));
+      assert.equal(r.status, 2, `${c}: ${r.out}`);
+      assert.match(r.out, INTEGRITY, c);
+    }
+    for (const c of ['git status', 'git log --oneline', 'git diff', 'git show HEAD']) {
+      assert.equal(hook(bash(c, dir)).status, 0, c);
+    }
+  });
+}
+
+test('R18b: intact hooks let state-changing git through', () => {
+  const dir = repo();
+  for (const c of ['git commit -m x', 'git checkout -b y', 'git tag v1']) {
+    const r = hook(bash(c, dir));
+    assert.equal(r.status, 0, `${c}: ${r.out}`);
+  }
+});
+
+test('R18b: this repository itself passes the integrity check', () => {
+  assert.equal(hook(bash('git commit --dry-run -m x', ROOT)).status, 0);
+});
+
 test('hook uses the real current branch', () => {
   const dir = repo({ branch: 'feat/real' });
   commitFile(dir, 'b.md', 'clean words\n');
@@ -446,6 +504,11 @@ test('settings command: round-2 gaps are blocked end to end', () => {
 test('settings command: dot-led globs reach Node even without Node 22 (fail closed), plain globs stay fast', () => {
   const env = { PATH: '/usr/bin:/bin', NVM_DIR: '/nonexistent', HOME: tmp('guard-home-') };
   assert.equal(viaSettings(ROOT, bash('rm -rf .g*', ROOT), env).status, 2);
+  for (const c of ['rm -rf scripts/../.g*', 'rm -rf /Users/x/hedayat-site/.g*', 'rm -rf ~/Documents/hedayat-site/.g*']) {
+    assert.equal(viaSettings(ROOT, bash(c, ROOT), env).status, 2, c);
+    assert.equal(viaSettings(ROOT, bash(c, ROOT)).status, 2, c);
+  }
+  assert.equal(viaSettings(ROOT, bash('ls docs/*.md', ROOT), env).status, 0);
   assert.equal(viaSettings(ROOT, bash('ls *.md', ROOT), env).status, 0);
   assert.equal(viaSettings(ROOT, bash('ls -la', ROOT), env).status, 0);
 });

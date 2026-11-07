@@ -197,7 +197,15 @@ function lex(src, start = 0, depth = 0, out = { substs: [] }) {
       if (depth > 0) { endPart(); return { parts, end: i }; }
       endPart(); i++; continue;
     }
-    if (c === ';' || c === '|' || c === '(') { endPart(); i++; continue; }
+    if (c === '|') {
+      endPart();
+      if (src[i + 1] === '|') { i += 2; continue; }
+      part.pipedIn = true; // the next part reads this pipe
+      i++;
+      if (src[i] === '&') i++;
+      continue;
+    }
+    if (c === ';' || c === '(') { endPart(); i++; continue; }
     if (c === '&') {
       if (src[i + 1] === '>') { endTok(); part.redirOut = true; i += 2; if (src[i] === '>') i++; continue; }
       endPart(); i++; continue;
@@ -207,6 +215,7 @@ function lex(src, start = 0, depth = 0, out = { substs: [] }) {
       if (cur && /^\d+$/.test(cur.v) && !cur.dyn) cur = null;
       endTok();
       if (c === '>') part.redirOut = true;
+      if (c === '<') part.stdinIn = true;
       let j = i + 1;
       if (c === '<' && src[j] === '<' && src[j + 1] !== '<') {
         // heredoc
@@ -259,7 +268,7 @@ const INTERPRETERS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'csh',
   'xargs', 'parallel', 'python', 'python2', 'python3', 'node', 'deno', 'bun', 'perl', 'ruby', 'php', 'lua', 'osascript',
   'su', 'sudo', 'doas', 'watch', 'script', 'expect', 'awk', 'gawk', 'find', 'fd', 'trap', 'exec', 'alias',
   'flock', 'caffeinate', 'setsid', 'chroot', 'ionice', 'taskset', 'unbuffer', 'chronic', 'strace', 'ltrace', 'dtruss',
-  'arch', 'xcrun', 'npx', 'bunx', 'pnpx', 'tmux', 'screen']);
+  'arch', 'xcrun', 'npx', 'bunx', 'pnpx', 'tmux', 'screen', 'ssh']);
 const READONLY_CMDS = new Set(['cat', 'ls', 'head', 'tail', 'less', 'more', 'grep', 'egrep', 'fgrep', 'rg', 'wc', 'file',
   'stat', 'diff', 'bat', 'shellcheck', 'shasum', 'md5', 'od', 'xxd', 'hexdump', 'test', '[']);
 const WHERE_CMDS = new Set(['which', 'type', 'whereis', 'man', 'brew', 'apropos']);
@@ -383,6 +392,7 @@ function classifyGit(args, ctx) {
   if (!subTok) return ALLOW;
   if (subTok.dyn) return deny(NESTED);
   const sub = subTok.v;
+  if (ctx.gitSubs) ctx.gitSubs.push(sub);
   const rest = args.slice(i + 1);
   if (GIT_LOWLEVEL.has(sub)) return deny(`git ${sub} is not allowed for agents (it can skip the hooks)`);
   if (!KNOWN_GIT.has(sub)) return deny('unknown git subcommand; git aliases are not allowed for agents');
@@ -459,6 +469,12 @@ function classifyPart(part, ctx, nested) {
   if (INTERPRETERS.has(b) && ctx.mentioned) return deny(NESTED);
   if (toks.some((t) => t.ansi) && ctx.mentioned) return deny(NESTED);
   const isData = DATA_CMDS.has(b) && (b !== 'sed' || sedIsData(toks.slice(1)));
+  // An unknown command that reads a pipe, a redirect or a heredoc, or that is handed an
+  // interpreter name, may be executing that input: not allowed alongside git.
+  if (ctx.mentioned && !isData) {
+    if (part.pipedIn || part.stdinIn || (part.heredocs && part.heredocs.length)) return deny(NESTED);
+    if (toks.slice(1).some((t) => INTERPRETERS.has(base(dequote(t.v))))) return deny(NESTED);
+  }
   if (!isData) {
     const slots = new Set(messageSlots(part.toks).map((x) => x.tok));
     for (const t of toks.slice(1)) {
@@ -510,6 +526,7 @@ export function classifyCommand(cmd, opts = {}) {
       return cachedBranch;
     },
     hasCd: false,
+    gitSubs: Array.isArray(opts.gitSubs) ? opts.gitSubs : null,
   };
   const all = lexed.parts.map((p) => ({ p, nested: false }));
   for (const s of lexed.substs) {
@@ -553,9 +570,8 @@ function currentBranch(cwd) {
 const clean = (s) => String(s).replace(/[\x00-\x1f\x7f]+/g, ' ').slice(0, 300);
 
 async function pushFlow(cwd, branch) {
-  const { git, effectiveRevs } = await import('./scope.mjs');
-  const { runPushChecks, loadGuardTerms } = await import('./check.mjs');
-  const { reviewDiff } = await import('./ai-review.mjs');
+  const { git } = await import('./scope.mjs');
+  const { runPushChecks, loadGuardTerms, agentReview } = await import('./check.mjs');
   const { findTerms } = await import('./terms.mjs');
 
   let terms;
@@ -585,29 +601,33 @@ async function pushFlow(cwd, branch) {
     block(lines);
   }
 
-  const range = effectiveRevs(refs[0], cwd);
-  if (range.kind === 'delete') allow();
-  const diff = git(['log', '-p', '--text', '-m', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames',
-    '--pretty=fuller', ...range.revs], cwd);
-  if (diff.trim() === '') { say(1, 'guard: nothing new to push'); allow(); }
-  const binaryPaths = [];
-  const numstat = git(['log', '-m', '--numstat', '--no-renames', '--format=', '-z', ...range.revs], cwd);
-  for (const entry of numstat.split('\0')) {
-    const m = /^\n*(-|\d+)\t(-|\d+)\t([\s\S]*)$/.exec(entry);
-    if (m && m[1] === '-' && m[2] === '-' && !binaryPaths.includes(m[3])) binaryPaths.push(m[3]);
-  }
-
-  let verdict;
-  try { verdict = await reviewDiff(diff, binaryPaths); } catch (e) {
-    block(`guard: AI review failed, blocking (${clean(e && e.code ? e.code : 'error')}): ${mask(clean(e && e.message ? e.message : ''))}`);
-  }
-  if (verdict.verdict !== 'pass') {
-    const lines = verdict.findings.map((f) => `guard: ${mask(clean(f.file))}:${f.line}: ${mask(clean(f.reason))}`);
-    lines.push('guard: AI review blocked this push');
-    block(lines);
-  }
+  // Same review input and verdict handling as the pre-push hook (scope.reviewInputForPush).
+  const ai = await agentReview(refs, terms, cwd);
+  if (!ai.ok) block(ai.lines);
   say(1, 'guard: push checks and AI review passed');
   allow();
+}
+
+const INTEGRITY = 'guard hooks are missing or disabled; Hedayat must restore them (bash scripts/setup.sh)';
+const STATE_CHANGING = new Set(['commit', 'push', 'merge', 'rebase', 'cherry-pick', 'tag', 'reset', 'checkout', 'switch',
+  'restore', 'am', 'apply', 'revert', 'pull']);
+
+// R18b: the repo's guard is intact: core.hooksPath=.githooks, the three hooks are regular
+// executable files (not symlinks), and scripts/guard/check.mjs exists. Any error = not intact.
+export function hooksIntact(cwd) {
+  try {
+    const run = (args, dir) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const top = run(['rev-parse', '--show-toplevel'], cwd);
+    if (run(['config', '--get', 'core.hooksPath'], top) !== '.githooks') return false;
+    for (const h of ['pre-commit', 'commit-msg', 'pre-push']) {
+      const f = path.join(top, '.githooks', h);
+      if (!fs.lstatSync(f).isFile()) return false;
+      fs.accessSync(f, fs.constants.X_OK);
+    }
+    return fs.lstatSync(path.join(top, 'scripts/guard/check.mjs')).isFile();
+  } catch {
+    return false;
+  }
 }
 
 const SELF = fileURLToPath(import.meta.url);
@@ -657,9 +677,11 @@ export async function main() {
     if (branchName === undefined) branchName = currentBranch(cwd);
     return branchName;
   };
-  const c = classifyCommand(cmd, { branch });
-  if (c.action === 'allow') allow();
+  const gitSubs = [];
+  const c = classifyCommand(cmd, { branch, gitSubs });
   if (c.action === 'deny') block(`guard: ${c.reason}`);
+  if ((c.action === 'push' || gitSubs.some((sub) => STATE_CHANGING.has(sub))) && !hooksIntact(cwd)) block(`guard: ${INTEGRITY}`);
+  if (c.action === 'allow') allow();
   if (c.action !== 'push') block('guard: unexpected classification, blocking');
   await runPushWorker(cwd, c.branch);
   block('guard: push flow ended unexpectedly, blocking');

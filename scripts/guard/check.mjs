@@ -5,7 +5,8 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadTerms, findTerms, GuardError } from './terms.mjs';
 import { newImagesInPush, confirmImages } from './images.mjs';
-import { collectStaged, collectPush, parsePushRefs, effectiveRevs } from './scope.mjs';
+import { collectStaged, collectPush, parsePushRefs, effectiveRevs, reviewInputForPush } from './scope.mjs';
+import { reviewDiff } from './ai-review.mjs';
 
 const HINT = 'create ~/.config/hedayat-site/blocked-terms.txt with at least one term';
 
@@ -118,7 +119,32 @@ export function runPushChecks(refs, opts = {}) {
   }
 }
 
-function main(argv) {
+const clean = (s) => String(s).replace(/[\x00-\x1f\x7f]+/g, ' ').slice(0, 300);
+const maskWith = (terms) => (s) => (findTerms(s, terms).length ? '[withheld]' : s);
+
+// AI findings as printable lines, with blocked terms and control characters removed.
+export function formatFindings(findings, terms) {
+  const mask = maskWith(terms);
+  return findings.map((f) => `guard: ${mask(clean(f.file))}:${f.line}: ${mask(clean(f.reason))}`);
+}
+
+// AI confidentiality review of a push (run after the deterministic checks pass).
+// Never throws; returns { ok, lines } with masked lines. An empty push needs no review.
+export async function agentReview(refs, terms, cwd = process.cwd()) {
+  const mask = maskWith(terms);
+  try {
+    const { diff, binaryPaths } = reviewInputForPush(refs, cwd);
+    if (diff.trim() === '' && binaryPaths.length === 0) return { ok: true, lines: ['guard: nothing new for the AI review'] };
+    const v = await reviewDiff(diff, binaryPaths);
+    if (v.verdict === 'pass') return { ok: true, lines: ['guard: AI review passed'] };
+    return { ok: false, lines: [...formatFindings(v.findings, terms), 'guard: AI review blocked this push'] };
+  } catch (e) {
+    const code = clean(e && e.code ? e.code : 'error');
+    return { ok: false, lines: [`guard: AI review failed, blocking (${code}): ${mask(clean(e && e.message ? e.message : ''))}`] };
+  }
+}
+
+async function main(argv) {
   const [mode, arg] = argv;
   if (!['staged', 'message', 'push'].includes(mode)) fail('usage: check.mjs staged | message <file> | push');
   const terms = loadOrDie();
@@ -136,6 +162,12 @@ function main(argv) {
       const r = runPushChecks(refs, { terms, tty: process.env.GUARD_TTY || '/dev/tty' });
       toStdout(r.lines);
       blocked = !r.ok;
+      // R18a: a push from an agent's shell (Claude Code sets CLAUDECODE) also gets the AI review.
+      if (!blocked && process.env.CLAUDECODE) {
+        const ai = await agentReview(refs, terms);
+        toStdout(ai.lines);
+        blocked = !ai.ok;
+      }
     }
   } catch (e) {
     fail(`scan failed, blocking (${e && e.code ? e.code : 'error'})`);
@@ -146,5 +178,5 @@ function main(argv) {
 // Run as a CLI only (the Claude Code hook imports runPushChecks). realpath so a symlinked path still runs.
 const invoked = (() => { try { return fs.realpathSync(process.argv[1]); } catch { return null; } })();
 if (invoked === fs.realpathSync(fileURLToPath(import.meta.url)) || path.basename(process.argv[1] || "") === "check.mjs") {
-  main(process.argv.slice(2));
+  main(process.argv.slice(2)).catch(() => fail('scan failed, blocking (error)'));
 }

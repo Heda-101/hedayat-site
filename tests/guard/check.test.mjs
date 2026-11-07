@@ -19,8 +19,14 @@ function tmp(prefix) {
 }
 test.after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
 
+// Tests run inside Claude Code shells; CLAUDECODE switches on the pre-push AI review (R18a),
+// so it is removed unless a test sets it explicitly.
+function baseEnv() { const e = { ...process.env }; delete e.CLAUDECODE; return e; }
+const FIX = path.join(ROOT, 'tests/guard/fixtures');
+const fake = (n) => path.join(FIX, `fake-claude-${n}.sh`);
+
 function git(cwd, args, opts = {}) {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, ...opts.env }, input: opts.input });
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', env: { ...baseEnv(), ...opts.env }, input: opts.input });
   if (!opts.allowFail && r.status !== 0) assert.fail(`git ${args[0]} failed: ${r.stderr}`);
   return r;
 }
@@ -55,7 +61,7 @@ function mkRepoWithOrigin() {
 function check(cwd, args, { terms = termsFile(), input = '', env = {} } = {}) {
   const r = spawnSync(process.execPath, [CHECK, ...args], {
     cwd, input, encoding: 'utf8',
-    env: { ...process.env, GUARD_TERMS_FILE: terms, ...env },
+    env: { ...baseEnv(), GUARD_TERMS_FILE: terms, ...env },
   });
   return { status: r.status, out: r.stdout + r.stderr };
 }
@@ -366,4 +372,72 @@ test('push: annotated tag message and commit author are scanned', () => {
   r = check(dir2, ['push'], { input: pushLine(dir2, 'main', base) });
   assert.equal(r.status, 1);
   assert.match(r.out, /blocked-term #1 at commit [0-9a-f]+ author/);
+});
+
+// ---- R18a: agent shells (CLAUDECODE set) get the AI review in pre-push ----
+function aiPush(ai, { claudecode = true, content = 'clean words\n', terms } = {}) {
+  const dir = mkRepoWithOrigin();
+  const base = rev(dir, 'main');
+  fs.writeFileSync(path.join(dir, 'b.md'), content);
+  git(dir, ['add', 'b.md']);
+  git(dir, ['commit', '-q', '-m', 'add b']);
+  const env = { GUARD_AI_CMD: fake(ai) };
+  if (claudecode) env.CLAUDECODE = '1';
+  return check(dir, ['push'], { input: pushLine(dir, 'main', base), env, ...(terms ? { terms } : {}) });
+}
+
+test('R18a: with CLAUDECODE, a passing AI review lets the push through', () => {
+  const r = aiPush('pass');
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /AI review passed/);
+});
+
+test('R18a: with CLAUDECODE, an AI block stops the push with file:line and reason', () => {
+  const r = aiPush('block');
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /a\.md:3/);
+  assert.match(r.out, /identifies a client/);
+});
+
+test('R18a: with CLAUDECODE, an AI error or garbage stops the push', () => {
+  for (const ai of ['fail', 'garbage']) {
+    const r = aiPush(ai);
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /AI review failed/);
+  }
+});
+
+test('R18a: without CLAUDECODE the AI review is not called', () => {
+  const r = aiPush('fail', { claudecode: false });
+  assert.equal(r.status, 0, r.out);
+  assert.doesNotMatch(r.out, /AI review/);
+});
+
+test('R18a: a blocked term stops the push before the AI review', () => {
+  const r = aiPush('fail', { content: 'Acme Corp\n' });
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /blocked-term #1 at b\.md:1/);
+  assert.doesNotMatch(r.out, /AI review/);
+});
+
+test('R18a: AI findings are masked when they contain a blocked term', () => {
+  const r = aiPush('block', { terms: termsFile('word:client\n') });
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /a\.md:3/);
+  assert.doesNotMatch(r.out, /client/i);
+});
+
+test('R18a wiring: a real git push from an agent shell is blocked by the AI review', () => {
+  const dir = mkRepoWithOrigin();
+  const env = { ...hooked(dir), CLAUDECODE: '1', GUARD_AI_CMD: fake('block') };
+  git(dir, ['checkout', '-q', '-b', 'feature']);
+  fs.writeFileSync(path.join(dir, 'w.md'), 'clean\n');
+  git(dir, ['add', 'w.md']);
+  git(dir, ['commit', '-q', '-m', 'w'], { env });
+  let r = git(dir, ['push', '-q', 'origin', 'feature'], { env, allowFail: true });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stdout + r.stderr, /AI review blocked this push/);
+  assert.equal(git(dir, ['ls-remote', '--heads', 'origin', 'feature']).stdout.trim(), '');
+  r = git(dir, ['push', '-q', 'origin', 'feature'], { env: { ...env, GUARD_AI_CMD: fake('pass') }, allowFail: true });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
 });

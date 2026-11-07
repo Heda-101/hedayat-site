@@ -55,12 +55,15 @@ function tty(content) {
   return f;
 }
 
+// Tests run inside Claude Code shells; CLAUDECODE would switch on the AI review (R18a).
+function baseEnv() { const e = { ...process.env }; delete e.CLAUDECODE; return e; }
+
 function runPush(dir, ref, env = {}) {
   const input = `${ref.localRef} ${ref.localSha} ${ref.remoteRef} ${ref.remoteSha}\n`;
   const terms = path.join(tmp('img-terms-'), 't.txt');
   fs.writeFileSync(terms, 'Zebra Quartz\n');
   const r = spawnSync(process.execPath, [CHECK, 'push'], {
-    cwd: dir, input, encoding: 'utf8', env: { ...process.env, GUARD_TERMS_FILE: terms, ...env },
+    cwd: dir, input, encoding: 'utf8', env: { ...baseEnv(), GUARD_TERMS_FILE: terms, ...env },
   });
   return { status: r.status, out: r.stdout + r.stderr, stdout: r.stdout };
 }
