@@ -441,3 +441,47 @@ test('R18a wiring: a real git push from an agent shell is blocked by the AI revi
   r = git(dir, ['push', '-q', 'origin', 'feature'], { env: { ...env, GUARD_AI_CMD: fake('pass') }, allowFail: true });
   assert.equal(r.status, 0, r.stdout + r.stderr);
 });
+
+test('ci: term in base..head blocks, clean range passes, old history is out of range', () => {
+  const dir = mkRepoWithOrigin();
+  const base = rev(dir, 'HEAD');
+  fs.writeFileSync(path.join(dir, 'ok.md'), 'fine\n');
+  git(dir, ['add', 'ok.md']);
+  git(dir, ['commit', '-q', '-m', 'clean change']);
+  const clean = rev(dir, 'HEAD');
+  let r = check(dir, ['ci', base, clean]);
+  assert.equal(r.status, 0, r.out);
+
+  fs.writeFileSync(path.join(dir, 'n.md'), 'we met Acme Corp\n');
+  git(dir, ['add', 'n.md']);
+  git(dir, ['commit', '-q', '-m', 'add notes']);
+  const bad = rev(dir, 'HEAD');
+  r = check(dir, ['ci', base, bad]);
+  assert.equal(r.status, 1);
+  assert.match(r.out, /blocked-term #1 at n\.md:1/);
+  assert.doesNotMatch(r.out, /acme/i);
+  // the offending commit is outside clean..clean2 once it is the base
+  fs.writeFileSync(path.join(dir, 'z.md'), 'fine too\n');
+  git(dir, ['add', 'z.md']);
+  git(dir, ['commit', '-q', '-m', 'more']);
+  assert.equal(check(dir, ['ci', bad, rev(dir, 'HEAD')]).status, 0);
+  // all-zero base scans everything reachable from head
+  assert.equal(check(dir, ['ci', Z, rev(dir, 'HEAD')]).status, 1);
+});
+
+test('ci: term in a commit message or path blocks; missing args fail closed', () => {
+  const dir = mkRepoWithOrigin();
+  const base = rev(dir, 'HEAD');
+  fs.writeFileSync(path.join(dir, 'acme-corp.md'), 'x\n');
+  git(dir, ['add', 'acme-corp.md']);
+  git(dir, ['commit', '-q', '-m', 'path only']);
+  let r = check(dir, ['ci', base, rev(dir, 'HEAD')]);
+  assert.equal(r.status, 1);
+  assert.match(r.out, /blocked-term #1 at path \[withheld\]/);
+  git(dir, ['rm', '-q', 'acme-corp.md']);
+  git(dir, ['commit', '-q', '-m', 'about Acme Corp']);
+  r = check(dir, ['ci', rev(dir, 'HEAD~1'), rev(dir, 'HEAD')]);
+  assert.equal(r.status, 1);
+  assert.match(r.out, /blocked-term #1 at commit [0-9a-f]+ message/);
+  assert.equal(check(dir, ['ci']).status, 1);
+});

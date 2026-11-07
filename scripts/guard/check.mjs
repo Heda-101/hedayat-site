@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadTerms, findTerms, GuardError } from './terms.mjs';
 import { newImagesInPush, confirmImages } from './images.mjs';
-import { collectStaged, collectPush, parsePushRefs, effectiveRevs, reviewInputForPush } from './scope.mjs';
+import { collectStaged, collectPush, collectRange, parsePushRefs, effectiveRevs, reviewInputForPush } from './scope.mjs';
 import { reviewDiff } from './ai-review.mjs';
 
 const HINT = 'create ~/.config/hedayat-site/blocked-terms.txt with at least one term';
@@ -146,7 +146,7 @@ export async function agentReview(refs, terms, cwd = process.cwd()) {
 
 async function main(argv) {
   const [mode, arg] = argv;
-  if (!['staged', 'message', 'push'].includes(mode)) fail('usage: check.mjs staged | message <file> | push');
+  if (!['staged', 'message', 'push', 'ci'].includes(mode)) fail('usage: check.mjs staged | message <file> | push | ci <baseSha> <headSha>');
   const terms = loadOrDie();
   let blocked = false;
   try {
@@ -157,6 +157,13 @@ async function main(argv) {
       if (!arg) fail('message mode needs the commit message file');
       const text = fs.readFileSync(arg, 'utf8');
       blocked = scan([{ where: 'commit message', text }], terms);
+    } else if (mode === 'ci') {
+      // CI term scan of base..head (contents, paths, messages, identities). An all-zero base
+      // (new branch) scans everything reachable from head. No gitleaks, images or AI review here.
+      const [, base, head] = argv;
+      if (!base || !head) fail('ci mode needs <baseSha> <headSha>');
+      const revs = /^0+$/.test(base) ? [head] : [`${base}..${head}`];
+      blocked = scan(collectRange(revs, process.cwd()), terms);
     } else {
       const refs = parsePushRefs(fs.readFileSync(0, 'utf8'));
       const r = runPushChecks(refs, { terms, tty: process.env.GUARD_TTY || '/dev/tty' });

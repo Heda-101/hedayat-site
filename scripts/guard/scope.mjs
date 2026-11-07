@@ -89,7 +89,7 @@ export function effectiveRevs(ref, cwd = process.cwd()) {
   return range;
 }
 
-function collectRange(revs, cwd) {
+export function collectRange(revs, cwd) {
   const items = [];
   const messages = git(['log', '--format=%H%x00%B%x00', ...revs], cwd).split('\0');
   for (let i = 0; i + 1 < messages.length; i += 2) {
