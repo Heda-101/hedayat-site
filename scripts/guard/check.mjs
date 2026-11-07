@@ -2,13 +2,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { loadTerms, findTerms, GuardError } from './terms.mjs';
 import { newImagesInPush, confirmImages } from './images.mjs';
 import { collectStaged, collectPush, parsePushRefs, effectiveRevs } from './scope.mjs';
 
 const HINT = 'create ~/.config/hedayat-site/blocked-terms.txt with at least one term';
 
-function termsPath() {
+export function termsPath() {
   return process.env.GUARD_TERMS_FILE || path.join(os.homedir(), '.config', 'hedayat-site', 'blocked-terms.txt');
 }
 
@@ -17,20 +18,25 @@ function fail(msg) {
   process.exit(1);
 }
 
-function loadOrDie() {
+// Loads the blocked terms; every failure is a GuardError whose message is safe to print.
+export function loadGuardTerms() {
   try {
     return loadTerms(termsPath());
   } catch (e) {
     if (e instanceof GuardError) {
-      if (e.code === 'TERMS_MISSING' || e.code === 'TERMS_EMPTY') fail(HINT);
-      fail(`blocked-terms file is invalid: ${e.message}`);
+      if (e.code === 'TERMS_MISSING' || e.code === 'TERMS_EMPTY') throw new GuardError(e.code, HINT);
+      throw new GuardError(e.code, `blocked-terms file is invalid: ${e.message}`);
     }
-    fail(`could not read the blocked-terms file (${e && e.code ? e.code : 'error'})`);
+    throw new GuardError('TERMS_UNREADABLE', `could not read the blocked-terms file (${e && e.code ? e.code : 'error'})`);
   }
 }
 
+function loadOrDie() {
+  try { return loadGuardTerms(); } catch (e) { fail(e.message); }
+}
+
 // Output must never contain a term, so a location that itself contains one is masked.
-function safeWhere(where, terms) {
+export function safeWhere(where, terms) {
   if (findTerms(where, terms).length === 0) return where;
   const kind = /^(path|branch|commit)\b/.exec(where);
   if (kind) return `${kind[1]} [withheld]`;
@@ -38,35 +44,77 @@ function safeWhere(where, terms) {
   return m ? `[withheld]${m[1]}` : '[withheld]';
 }
 
-function scan(items, terms) {
-  let blocked = false;
+const toStdout = (lines) => { for (const l of lines) process.stdout.write(`${l}\n`); };
+const toStderr = (lines) => { for (const l of lines) process.stderr.write(`${l}\n`); };
+
+// Term hits as printable lines (locations masked).
+function scanLines(items, terms) {
+  const out = [];
   for (const it of items) {
-    for (const h of findTerms(it.text, terms)) {
-      blocked = true;
-      process.stdout.write(`blocked-term #${h.termIndex} at ${safeWhere(it.where, terms)}\n`);
-    }
+    for (const h of findTerms(it.text, terms)) out.push(`blocked-term #${h.termIndex} at ${safeWhere(it.where, terms)}`);
   }
-  return blocked;
+  return out;
+}
+
+function scan(items, terms) {
+  const lines = scanLines(items, terms);
+  toStdout(lines);
+  return lines.length > 0;
+}
+
+// Returns masked output lines; an empty array means gitleaks passed.
+function gitleaksLines(args, terms, cwd) {
+  try {
+    execFileSync('gitleaks', [...args, '--redact', '--no-banner'], {
+      cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 256 * 1024 * 1024,
+    });
+    return [];
+  } catch (e) {
+    if (e.code === 'ENOENT') return ['guard: gitleaks not found; install it (brew install gitleaks). Blocking.'];
+    const out = [];
+    for (const l of `${e.stdout || ''}${e.stderr || ''}`.split('\n')) {
+      if (l.trim() === '') continue;
+      out.push(findTerms(l, terms).length ? '[line withheld]' : l);
+    }
+    out.push('guard: gitleaks blocked this (secret found or scan failed)');
+    return out;
+  }
 }
 
 function runGitleaks(args, terms) {
+  const lines = gitleaksLines(args, terms);
+  toStderr(lines);
+  return lines.length > 0;
+}
+
+// Deterministic push checks shared by the pre-push hook and the Claude Code hook.
+// opts: { cwd, terms (loaded via loadGuardTerms when absent), tty (no tty = new images block) }.
+// Never throws; returns { ok, lines, images } where lines are already masked.
+export function runPushChecks(refs, opts = {}) {
+  const cwd = opts.cwd || process.cwd();
+  const lines = [];
+  let images = [];
+  let terms;
+  try { terms = opts.terms || loadGuardTerms(); }
+  catch (e) { return { ok: false, lines: [`guard: ${e.message}`], images }; }
   try {
-    execFileSync('gitleaks', [...args, '--redact', '--no-banner'], {
-      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 256 * 1024 * 1024,
-    });
-    return false;
+    for (const ref of refs) {
+      const range = effectiveRevs(ref, cwd);
+      if (range.kind === 'delete') continue;
+      lines.push(...gitleaksLines(['git', `--log-opts=${range.revs.join(' ')}`], terms, cwd));
+    }
+    lines.push(...scanLines(collectPush(refs, cwd), terms));
+    if (lines.length > 0) return { ok: false, lines, images };
+    // A term scan cannot read pictures, so a human must confirm any new image (fails closed).
+    images = newImagesInPush(refs, cwd);
+    if (images.length > 0) {
+      for (const p of images) lines.push(`image needs confirmation: ${safeWhere(`path ${p}`, terms).replace(/^path /, '')}`);
+      if (!opts.tty || !confirmImages(images, opts.tty)) return { ok: false, lines, images };
+    }
+    return { ok: true, lines, images };
   } catch (e) {
-    if (e.code === 'ENOENT') {
-      process.stderr.write('guard: gitleaks not found; install it (brew install gitleaks). Blocking.\n');
-      return true;
-    }
-    const text = `${e.stdout || ''}${e.stderr || ''}`;
-    for (const l of text.split('\n')) {
-      if (l.trim() === '') continue;
-      process.stderr.write(`${findTerms(l, terms).length ? '[line withheld]' : l}\n`);
-    }
-    process.stderr.write('guard: gitleaks blocked this (secret found or scan failed)\n');
-    return true;
+    lines.push(`guard: scan failed, blocking (${e && e.code ? e.code : 'error'})`);
+    return { ok: false, lines, images };
   }
 }
 
@@ -85,20 +133,9 @@ function main(argv) {
       blocked = scan([{ where: 'commit message', text }], terms);
     } else {
       const refs = parsePushRefs(fs.readFileSync(0, 'utf8'));
-      for (const ref of refs) {
-        const range = effectiveRevs(ref);
-        if (range.kind === 'delete') continue;
-        blocked = runGitleaks(['git', `--log-opts=${range.revs.join(' ')}`], terms) || blocked;
-      }
-      blocked = scan(collectPush(refs), terms) || blocked;
-      if (!blocked) {
-        // A term scan cannot read pictures, so a human must confirm any new image (fails closed).
-        const images = newImagesInPush(refs);
-        if (images.length > 0) {
-          for (const p of images) process.stdout.write(`image needs confirmation: ${p}\n`);
-          blocked = !confirmImages(images, process.env.GUARD_TTY || '/dev/tty');
-        }
-      }
+      const r = runPushChecks(refs, { terms, tty: process.env.GUARD_TTY || '/dev/tty' });
+      toStdout(r.lines);
+      blocked = !r.ok;
     }
   } catch (e) {
     fail(`scan failed, blocking (${e && e.code ? e.code : 'error'})`);
@@ -106,4 +143,8 @@ function main(argv) {
   process.exit(blocked ? 1 : 0);
 }
 
-main(process.argv.slice(2));
+// Run as a CLI only (the Claude Code hook imports runPushChecks). realpath so a symlinked path still runs.
+const invoked = (() => { try { return fs.realpathSync(process.argv[1]); } catch { return null; } })();
+if (invoked === fs.realpathSync(fileURLToPath(import.meta.url)) || path.basename(process.argv[1] || "") === "check.mjs") {
+  main(process.argv.slice(2));
+}
