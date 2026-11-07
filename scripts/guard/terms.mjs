@@ -8,6 +8,9 @@ export class GuardError extends Error {
   }
 }
 
+// Printable form of untrusted text (model findings, git config values): no control characters, bounded.
+export const clean = (s) => String(s).replace(/[\x00-\x1f\x7f]+/g, ' ').slice(0, 300);
+
 export function normalize(s) {
   return s.normalize('NFKC').toLowerCase().replace(/[^a-z0-9]/g, '');
 }

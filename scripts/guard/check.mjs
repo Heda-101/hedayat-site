@@ -2,8 +2,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { loadTerms, findTerms, GuardError } from './terms.mjs';
+import { pathToFileURL } from 'node:url';
+import { loadTerms, findTerms, GuardError, clean } from './terms.mjs';
 import { newImagesInPush, confirmImages } from './images.mjs';
 import { collectStaged, collectPush, collectRange, parsePushRefs, effectiveRevs, reviewBatchesForPush } from './scope.mjs';
 import { reviewDiff, REVIEW_TIMEOUT_MS } from './ai-review.mjs';
@@ -119,7 +119,6 @@ export function runPushChecks(refs, opts = {}) {
   }
 }
 
-const clean = (s) => String(s).replace(/[\x00-\x1f\x7f]+/g, ' ').slice(0, 300);
 const maskWith = (terms) => (s) => (findTerms(s, terms).length ? '[withheld]' : s);
 
 // AI findings as printable lines, with blocked terms and control characters removed.
@@ -200,8 +199,9 @@ async function main(argv) {
   process.exit(blocked ? 1 : 0);
 }
 
-// Run as a CLI only (the Claude Code hook imports runPushChecks). realpath so a symlinked path still runs.
-const invoked = (() => { try { return fs.realpathSync(process.argv[1]); } catch { return null; } })();
-if (invoked === fs.realpathSync(fileURLToPath(import.meta.url)) || path.basename(process.argv[1] || "") === "check.mjs") {
+// Run as a CLI only (the Claude Code hook imports runPushChecks). Node resolves a symlinked
+// entry point, so compare against the real path of argv[1].
+const invoked = (() => { try { return pathToFileURL(fs.realpathSync(process.argv[1])).href; } catch { return null; } })();
+if (invoked === import.meta.url) {
   main(process.argv.slice(2)).catch(() => fail('scan failed, blocking (error)'));
 }

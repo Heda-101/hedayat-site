@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const CHECK = path.join(ROOT, 'scripts/guard/check.mjs');
@@ -548,4 +548,13 @@ test('R22: the overall AI deadline covers all batches', () => {
     { GUARD_AI_DEADLINE_MS: '1500' });
   assert.equal(r.status, 1, r.out);
   assert.match(r.out, /AI review failed/);
+});
+
+test('M10: importing check.mjs from another file named check.mjs does not run its CLI', () => {
+  const d = tmp('guard-import-');
+  const f = path.join(d, 'check.mjs');
+  fs.writeFileSync(f, `import ${JSON.stringify(pathToFileURL(CHECK).href)};\nconsole.log('imported');\n`);
+  const r = spawnSync(process.execPath, [f], { encoding: 'utf8', env: baseEnv() });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /imported/);
 });

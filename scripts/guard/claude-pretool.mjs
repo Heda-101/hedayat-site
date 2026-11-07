@@ -90,11 +90,19 @@ function lex(src, start = 0, depth = 0, out = { substs: [] }) {
   let part = { toks: [], redirOut: false, heredocs: [] };
   let cur = null; // { v, dyn }
   let pendingHeredocs = [];
+  let redirOp = null; // the next word is the target of this redirect operator
   let i = start;
 
-  const word = () => { if (!cur) cur = { v: '', dyn: false }; return cur; };
+  const word = () => {
+    if (!cur) { cur = { v: '', dyn: false }; if (redirOp) { cur.redir = redirOp; redirOp = null; } }
+    return cur;
+  };
   const endTok = () => { if (cur) { part.toks.push(cur); cur = null; } };
-  const endPart = () => { endTok(); if (part.toks.length) parts.push(part); part = { toks: [], redirOut: false, heredocs: [] }; };
+  const endPart = () => {
+    endTok(); redirOp = null;
+    if (part.toks.length) parts.push(part);
+    part = { toks: [], redirOut: false, heredocs: [] };
+  };
 
   function subst(open) {
     // open is the index of the first char after `$(`, `<(` or `>(`
@@ -208,7 +216,11 @@ function lex(src, start = 0, depth = 0, out = { substs: [] }) {
     }
     if (c === ';' || c === '(') { endPart(); i++; continue; }
     if (c === '&') {
-      if (src[i + 1] === '>') { endTok(); part.redirOut = true; i += 2; if (src[i] === '>') i++; continue; }
+      if (src[i + 1] === '>') {
+        endTok(); part.redirOut = true;
+        const from = i; i += 2; if (src[i] === '>') i++;
+        redirOp = src.slice(from, i); continue;
+      }
       endPart(); i++; continue;
     }
     if (c === '<' || c === '>') {
@@ -236,6 +248,7 @@ function lex(src, start = 0, depth = 0, out = { substs: [] }) {
       }
       while (j < src.length && (src[j] === '<' || src[j] === '>')) j++;
       if (src[j] === '&' || src[j] === '|') j++;
+      redirOp = src.slice(i, j);
       i = j; continue;
     }
     word().v += c; i++;
@@ -272,10 +285,12 @@ const INTERPRETERS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'csh',
   'arch', 'xcrun', 'npx', 'bunx', 'pnpx', 'tmux', 'screen', 'ssh']);
 const READONLY_CMDS = new Set(['cat', 'ls', 'head', 'tail', 'less', 'more', 'grep', 'egrep', 'fgrep', 'rg', 'wc', 'file',
   'stat', 'diff', 'bat', 'shellcheck', 'shasum', 'md5', 'od', 'xxd', 'hexdump', 'test', '[']);
-const WHERE_CMDS = new Set(['which', 'type', 'whereis', 'man', 'brew', 'apropos']);
 // Commands that never execute their arguments: a `git` argument to these is data.
 const DATA_CMDS = new Set(['cat', 'grep', 'egrep', 'fgrep', 'rg', 'ls', 'echo', 'printf', 'head', 'tail', 'wc', 'sed',
-  'less', 'more', 'file', 'stat', 'diff', 'bat', 'jq', 'which', 'type', 'whereis', 'man', 'cd', 'pushd', 'popd']);
+  'less', 'more', 'file', 'stat', 'diff', 'bat', 'jq', 'which', 'type', 'whereis', 'man', 'cd', 'pushd', 'popd',
+  'sort', 'uniq', 'cut', 'tr', 'column', 'nl', 'comm']);
+// sort runs --compress-program on its temp files, so that option makes it an executor.
+const sortIsData = (args) => !args.some((t) => t.dyn || /^--com/.test(dequote(t.v)));
 
 // sed counts as data only when no script uses the e (execute) or w/W (write) commands or flags.
 function sedIsData(args) {
@@ -441,8 +456,12 @@ function classifyGit(args, ctx) {
     const branch = ctx.branch();
     if (!branch) return deny(`detached HEAD: ${PUSH_ONLY}`);
     if (branch === 'main') return deny(PUSH_ONLY);
-    if (rest.some((t) => t.dyn || /[{}$*?[\]~\\^:@]/.test(t.v))) return deny(PUSH_ONLY);
-    const v = rest.map((t) => t.v);
+    // Output redirects that only merge or drop messages (2>&1, 2>/dev/null) are fine; nothing else.
+    const okRedir = (t) => (t.redir === '>&' && t.v === '1') || (t.redir === '>' && t.v === '/dev/null');
+    if (rest.some((t) => t.redir && !okRedir(t))) return deny(PUSH_ONLY);
+    const args = rest.filter((t) => !t.redir);
+    if (args.some((t) => t.dyn || /[{}$*?[\]~\\^:@]/.test(t.v))) return deny(PUSH_ONLY);
+    const v = args.map((t) => (t.v === '--set-upstream' ? '-u' : t.v));
     const ok = v.length === 0
       || (v.length === 2 && v[0] === 'origin' && v[1] === branch)
       || (v.length === 3 && v[0] === '-u' && v[1] === 'origin' && v[2] === branch);
@@ -469,7 +488,7 @@ function classifyPart(part, ctx, nested) {
   }
   if (INTERPRETERS.has(b) && ctx.mentioned) return deny(NESTED);
   if (toks.some((t) => t.ansi) && ctx.mentioned) return deny(NESTED);
-  const isData = DATA_CMDS.has(b) && (b !== 'sed' || sedIsData(toks.slice(1)));
+  const isData = DATA_CMDS.has(b) && (b !== 'sed' || sedIsData(toks.slice(1))) && (b !== 'sort' || sortIsData(toks.slice(1)));
   // An unknown command that reads a pipe, a redirect or a heredoc, or that is handed an
   // interpreter name, may be executing that input: not allowed alongside git.
   if (ctx.mentioned && !isData) {
@@ -637,12 +656,10 @@ function currentBranch(cwd) {
   }
 }
 
-const clean = (s) => String(s).replace(/[\x00-\x1f\x7f]+/g, ' ').slice(0, 300);
-
 async function pushFlow(cwd, branch) {
   const { git } = await import('./scope.mjs');
   const { runPushChecks, loadGuardTerms } = await import('./check.mjs');
-  const { findTerms } = await import('./terms.mjs');
+  const { findTerms, clean } = await import('./terms.mjs');
 
   let terms;
   try { terms = loadGuardTerms(); } catch (e) { block(`guard: ${e.message}`); }

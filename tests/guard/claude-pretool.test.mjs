@@ -39,7 +39,7 @@ const denied = [
   'GIT_CONFIG_GLOBAL=/tmp/c git commit -m x', 'GIT_EXEC_PATH=/tmp git push', 'git --exec-path=/tmp push',
   'git push --mirror', 'git push --tags', 'git push --force-with-lease', 'git push -f',
   'git push upstream feat/x', 'git push origin feat/x other', 'git push origin +feat/x', 'git push origin HEAD',
-  'git push --set-upstream origin feat/x', 'git push -q', 'git send-pack origin feat/x', 'git update-ref refs/remotes/origin/feat/x HEAD',
+  'git push -q', 'git send-pack origin feat/x', 'git update-ref refs/remotes/origin/feat/x HEAD',
   'git commit-tree HEAD^{tree} -m x', 'git pu', 'git push origin feat/x; git push origin main',
   // nested shells
   'echo $(git push --force)', 'echo `git push`', 'bash -c "git push"', 'sh -c \'git push\'', 'eval git push',
@@ -598,4 +598,31 @@ test('I5: settings command routes unquoted gh commands to Node', () => {
   assert.match(r.out, /blocked-term #1 in --title/);
   assert.equal(viaSettings(ROOT, bash('gh pr create -t fine -b ok', dir)).status, 0);
   assert.equal(viaSettings(ROOT, bash('echo high', dir)).status, 0);
+});
+
+// ---------- Minor 11: day-one friction ----------
+
+test('M11: text filters after git are data; tee is not', () => {
+  for (const c of ['git status --short | sort', 'git log --format=%an | sort | uniq -c', 'git log --oneline | cut -c1-7',
+    'git branch | tr -d " "', 'git status --short | column -t', 'git log --oneline | nl', 'comm -12 a.txt b.txt && git status',
+    'sort git-list.txt', 'git diff --name-only | sort -u | uniq']) {
+    assert.deepEqual(classifyCommand(c, B), { action: 'allow' }, c);
+  }
+  for (const c of ['git log | tee out.txt', 'git status | tee -a .githooks/pre-push', 'echo "git push" | sort --compress-program=sh',
+    'git log | sort --compress-program sh']) {
+    assert.equal(classifyCommand(c, B).action, 'deny', c);
+  }
+});
+
+test('M11: an otherwise-valid push may end in 2>&1 or 2>/dev/null, and --set-upstream means -u', () => {
+  const want = { action: 'push', remote: 'origin', branch: 'feat/x' };
+  for (const c of ['git push 2>&1', 'git push -u origin feat/x 2>&1', 'git push origin feat/x 2>/dev/null',
+    'git push --set-upstream origin feat/x', 'git push --set-upstream origin feat/x 2>&1', 'git push 2>&1 | tail -5',
+    'git push -u origin feat/x 2> /dev/null']) {
+    assert.deepEqual(classifyCommand(c, B), want, c);
+  }
+  for (const c of ['git push > out.txt', 'git push 2>&1 origin main', 'git push origin feat/x 2>/tmp/log', 'git push 2>&3',
+    'git push --set-upstream', 'git push --set-upstream origin main', 'git push < /dev/null origin x']) {
+    assert.equal(classifyCommand(c, B).action, 'deny', c);
+  }
 });

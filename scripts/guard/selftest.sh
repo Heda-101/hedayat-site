@@ -15,7 +15,6 @@ trap 'rm -rf "$WORK"' EXIT
 TERM_TEXT='Selftest Client Co'
 printf '%s\n' "$TERM_TEXT" >"$WORK/terms.txt"
 FAILS=0
-N=0
 
 # Every command below runs against the selftest's own terms file, never the developer's real one.
 export GUARD_TERMS_FILE="$WORK/terms.txt" GUARD_AI_CMD="$FIX/fake-claude-pass.sh" GUARD_TTY=/nonexistent
