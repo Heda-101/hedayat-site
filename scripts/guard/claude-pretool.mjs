@@ -1,6 +1,7 @@
 // Claude Code PreToolUse hook for Bash (layer 3 of the commit/push guard).
 // Denies attempts to bypass the git hooks; on an agent `git push` it re-runs the
-// deterministic push checks plus the AI confidentiality review.
+// deterministic push checks. The AI confidentiality review runs in the pre-push hook,
+// which every agent push reaches (R18a, R22).
 // Exit 0 = allow, exit 2 = block (reason on stderr). Exit 1 is never used: Claude Code
 // treats it as non-blocking, so every error on a git-related command becomes exit 2.
 import fs from 'node:fs';
@@ -571,7 +572,7 @@ const clean = (s) => String(s).replace(/[\x00-\x1f\x7f]+/g, ' ').slice(0, 300);
 
 async function pushFlow(cwd, branch) {
   const { git } = await import('./scope.mjs');
-  const { runPushChecks, loadGuardTerms, agentReview } = await import('./check.mjs');
+  const { runPushChecks, loadGuardTerms } = await import('./check.mjs');
   const { findTerms } = await import('./terms.mjs');
 
   let terms;
@@ -601,10 +602,8 @@ async function pushFlow(cwd, branch) {
     block(lines);
   }
 
-  // Same review input and verdict handling as the pre-push hook (scope.reviewInputForPush).
-  const ai = await agentReview(refs, terms, cwd);
-  if (!ai.ok) block(ai.lines);
-  say(1, 'guard: push checks and AI review passed');
+  // The AI review follows in the pre-push hook of the push itself (R18a, R22).
+  say(1, 'guard: push checks passed; the AI review runs in pre-push');
   allow();
 }
 

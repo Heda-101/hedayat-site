@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { GuardError } from './terms.mjs';
 
 export const MAX_DIFF_BYTES = 200_000;
-const TIMEOUT_MS = 120_000;
+export const REVIEW_TIMEOUT_MS = 120_000;
 const MODEL = 'claude-sonnet-5-5';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -89,7 +89,7 @@ function run(cmd, args, input, timeoutMs) {
   });
 }
 
-export async function reviewDiff(diff, binaryPaths, { timeoutMs = TIMEOUT_MS } = {}) {
+export async function reviewDiff(diff, binaryPaths, { timeoutMs = REVIEW_TIMEOUT_MS } = {}) {
   if (Buffer.byteLength(diff) > MAX_DIFF_BYTES) {
     throw new GuardError('AI_TOO_LARGE', `diff exceeds ${MAX_DIFF_BYTES} bytes`);
   }

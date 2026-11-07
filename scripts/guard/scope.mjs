@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { GuardError } from './terms.mjs';
 
 const ZERO = /^0+$/;
 const MAX = 1024 * 1024 * 1024;
@@ -131,23 +132,83 @@ export function collectPush(refs, cwd = process.cwd()) {
   return items;
 }
 
-// Input for the AI confidentiality review of a push: full diffs and messages of the same
-// effective revs the other checks scan, annotated-tag text, and the binary paths.
-// Shared by the pre-push hook (agent shells) and the Claude Code hook. Throws on git errors.
-export function reviewInputForPush(refs, cwd = process.cwd()) {
-  let diff = '';
-  const binaryPaths = [];
+// ---------- AI review input (R22) ----------
+// The AI confidentiality review sees full diffs and messages of the same effective revs the
+// other checks scan, plus annotated-tag text and binary paths. It is batched by commit so that
+// no single model call sees more than MAX_BATCH_BYTES of diff: whole commits are packed in
+// order; a commit over the cap is split by file; a single file over the cap, or more than
+// MAX_BATCHES batches, blocks. Generated lockfiles are left out of the AI input only (the term
+// scan and gitleaks still read them).
+export const MAX_BATCH_BYTES = 200_000;
+export const MAX_BATCHES = 10;
+export const LOCKFILE_PATHSPECS = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', '*.lock']
+  .map((g) => `:(top,exclude,glob)**/${g}`);
+const PATHSPEC = ['--', ':(top)', ...LOCKFILE_PATHSPECS];
+const DIFF_OPTS = ['--root', '-m', '-r', '--text', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames'];
+const SPLIT = 'split this push into smaller pushes';
+
+const tooLarge = (what) => new GuardError('AI_TOO_LARGE', `${what} is over the ${MAX_BATCH_BYTES}-byte AI review cap; ${SPLIT}`);
+const bytes = (s) => Buffer.byteLength(s);
+
+function binaryPathsOf(sha, cwd) {
+  const out = [];
+  const numstat = git(['diff-tree', '--numstat', '--no-commit-id', '-z', ...DIFF_OPTS, sha, ...PATHSPEC], cwd);
+  for (const entry of numstat.split('\0')) {
+    const m = /^\n*(-|\d+)\t(-|\d+)\t([\s\S]*)$/.exec(entry);
+    if (m && m[1] === '-' && m[2] === '-' && !out.includes(m[3])) out.push(m[3]);
+  }
+  return out;
+}
+
+// One commit as review units: the whole commit, or (when over the cap) its header plus one file each.
+function commitUnits(sha, cwd) {
+  const short = sha.slice(0, 7);
+  const whole = git(['diff-tree', '--always', '-p', '--pretty=fuller', ...DIFF_OPTS, sha, ...PATHSPEC], cwd);
+  const binaryPaths = binaryPathsOf(sha, cwd);
+  if (bytes(whole) <= MAX_BATCH_BYTES) return [{ diff: whole, binaryPaths }];
+  const header = git(['show', '-s', '--pretty=fuller', sha], cwd);
+  const names = [...new Set(git(['diff-tree', '--name-only', '--no-commit-id', '-z', ...DIFF_OPTS, sha, ...PATHSPEC], cwd)
+    .split('\0').filter(Boolean))];
+  const units = [];
+  names.forEach((name, i) => {
+    const diff = `${header}\n(part ${i + 1} of ${names.length})\n`
+      + git(['diff-tree', '-p', '--no-commit-id', ...DIFF_OPTS, sha, '--', `:(top,literal)${name}`], cwd);
+    if (bytes(diff) > MAX_BATCH_BYTES) throw tooLarge(`one file in commit ${short}`);
+    units.push({ diff, binaryPaths: binaryPaths.includes(name) ? [name] : [] });
+  });
+  if (units.length === 0) throw tooLarge(`commit ${short}`);
+  return units;
+}
+
+// Returns [{ diff, binaryPaths }] in push order; [] when nothing is new. Throws GuardError or git errors.
+export function reviewBatchesForPush(refs, cwd = process.cwd()) {
+  const units = [];
+  const seen = new Set();
   for (const ref of refs) {
     const range = effectiveRevs(ref, cwd);
     if (range.kind === 'delete') continue;
-    if (git(['cat-file', '-t', ref.localSha], cwd).trim() === 'tag') diff += git(['cat-file', 'tag', ref.localSha], cwd);
-    diff += git(['log', '-p', '--text', '-m', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames',
-      '--pretty=fuller', ...range.revs], cwd);
-    const numstat = git(['log', '-m', '--numstat', '--no-renames', '--format=', '-z', ...range.revs], cwd);
-    for (const entry of numstat.split('\0')) {
-      const m = /^\n*(-|\d+)\t(-|\d+)\t([\s\S]*)$/.exec(entry);
-      if (m && m[1] === '-' && m[2] === '-' && !binaryPaths.includes(m[3])) binaryPaths.push(m[3]);
+    if (git(['cat-file', '-t', ref.localSha], cwd).trim() === 'tag') {
+      const text = git(['cat-file', 'tag', ref.localSha], cwd);
+      if (bytes(text) > MAX_BATCH_BYTES) throw tooLarge(`tag ${ref.localSha.slice(0, 7)}`);
+      units.push({ diff: text, binaryPaths: [] });
+    }
+    for (const sha of git(['rev-list', '--reverse', ...range.revs], cwd).split('\n').filter(Boolean)) {
+      if (seen.has(sha)) continue;
+      seen.add(sha);
+      units.push(...commitUnits(sha, cwd));
     }
   }
-  return { diff, binaryPaths };
+  const batches = [];
+  let cur = null;
+  for (const u of units) {
+    if (cur && bytes(cur.diff) + bytes(u.diff) <= MAX_BATCH_BYTES) {
+      cur.diff += u.diff;
+      for (const p of u.binaryPaths) if (!cur.binaryPaths.includes(p)) cur.binaryPaths.push(p);
+    } else {
+      cur = { diff: u.diff, binaryPaths: [...u.binaryPaths] };
+      batches.push(cur);
+      if (batches.length > MAX_BATCHES) throw new GuardError('AI_TOO_LARGE', `this push needs more than ${MAX_BATCHES} AI review batches; ${SPLIT}`);
+    }
+  }
+  return batches;
 }

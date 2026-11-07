@@ -137,13 +137,21 @@ done
 newbranch "$R" ai-pass; commitfile "$R" pass.md 'content pass'
 out="$(AI=pass run_env git -C "$R" push -q origin ai-pass 2>&1)"; expect "layer 2" "pre-push AI review with a pass reviewer allows the push" 0 $? "$out"
 
-for ai in block fail; do
-  git -C "$R" checkout -q "ai-$ai"
-  out="$(AI=$ai hook "$R" 'git push origin '"ai-$ai" 2>&1)"
-  expect "layer 2" "Claude hook on git push with a $ai reviewer exits 2" 2 $? "$out"
-done
+# R22: the Claude hook leaves the AI review to pre-push, so its verdict cannot stop the hook.
+git -C "$R" checkout -q ai-block
+out="$(AI=block hook "$R" 'git push origin ai-block' 2>&1)"
+expect "layer 2" "Claude hook on git push leaves the AI review to pre-push (exits 0)" 0 $? "$out"
 newbranch "$R" hook-pass; commitfile "$R" hp.md 'hook pass content'
 out="$(AI=pass hook "$R" 'git push origin hook-pass' 2>&1)"; expect "layer 2" "Claude hook on git push with a pass reviewer exits 0" 0 $? "$out"
+
+# R22: a push over the 200 KB AI cap is reviewed in batches instead of being refused.
+newbranch "$R" ai-big
+for n in 1 2 3; do
+  awk -v n="$n" 'BEGIN { for (i = 0; i < 2000; i++) printf "batch %s filler line number %d\n", n, i }' >"$R/big$n.md"
+  git -C "$R" add "big$n.md" && git -C "$R" commit -q -m "big $n"
+done
+out="$(AI=pass run_env git -C "$R" push -q origin ai-big 2>&1)"
+expect "layer 2" "pre-push AI review of a push over 200 KB runs in batches and passes" 0 $? "$out"
 git -C "$R" checkout -q main
 
 # ------------------------------------------------------------------ layer 3

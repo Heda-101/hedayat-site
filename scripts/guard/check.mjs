@@ -5,8 +5,8 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadTerms, findTerms, GuardError } from './terms.mjs';
 import { newImagesInPush, confirmImages } from './images.mjs';
-import { collectStaged, collectPush, collectRange, parsePushRefs, effectiveRevs, reviewInputForPush } from './scope.mjs';
-import { reviewDiff } from './ai-review.mjs';
+import { collectStaged, collectPush, collectRange, parsePushRefs, effectiveRevs, reviewBatchesForPush } from './scope.mjs';
+import { reviewDiff, REVIEW_TIMEOUT_MS } from './ai-review.mjs';
 
 const HINT = 'create ~/.config/hedayat-site/blocked-terms.txt with at least one term';
 
@@ -128,16 +128,34 @@ export function formatFindings(findings, terms) {
   return findings.map((f) => `guard: ${mask(clean(f.file))}:${f.line}: ${mask(clean(f.reason))}`);
 }
 
-// AI confidentiality review of a push (run after the deterministic checks pass).
+// Overall budget for every AI batch of one push, kept well inside the 600 s Bash timeout
+// agents use for `git push`. GUARD_AI_DEADLINE_MS can only shorten it.
+export const AI_DEADLINE_MS = 360_000;
+function aiDeadlineMs() {
+  const v = Number(process.env.GUARD_AI_DEADLINE_MS);
+  return Number.isFinite(v) && v > 0 ? Math.min(v, AI_DEADLINE_MS) : AI_DEADLINE_MS;
+}
+
+// AI confidentiality review of a push (run after the deterministic checks pass), one model
+// call per batch (R22), in order; any block or failure blocks the push.
 // Never throws; returns { ok, lines } with masked lines. An empty push needs no review.
 export async function agentReview(refs, terms, cwd = process.cwd()) {
   const mask = maskWith(terms);
   try {
-    const { diff, binaryPaths } = reviewInputForPush(refs, cwd);
-    if (diff.trim() === '' && binaryPaths.length === 0) return { ok: true, lines: ['guard: nothing new for the AI review'] };
-    const v = await reviewDiff(diff, binaryPaths);
-    if (v.verdict === 'pass') return { ok: true, lines: ['guard: AI review passed'] };
-    return { ok: false, lines: [...formatFindings(v.findings, terms), 'guard: AI review blocked this push'] };
+    const batches = reviewBatchesForPush(refs, cwd);
+    if (batches.length === 0) return { ok: true, lines: ['guard: nothing new for the AI review'] };
+    const end = Date.now() + aiDeadlineMs();
+    for (let i = 0; i < batches.length; i++) {
+      const left = end - Date.now();
+      if (left <= 0) throw new GuardError('AI_FAILED', 'AI review hit its overall deadline');
+      const v = await reviewDiff(batches[i].diff, batches[i].binaryPaths, { timeoutMs: Math.min(REVIEW_TIMEOUT_MS, left) });
+      if (v.verdict !== 'pass') {
+        return { ok: false, lines: [...formatFindings(v.findings, terms),
+          `guard: AI review blocked this push (batch ${i + 1} of ${batches.length})`] };
+      }
+    }
+    const n = batches.length;
+    return { ok: true, lines: [`guard: AI review passed (${n} batch${n === 1 ? '' : 'es'})`] };
   } catch (e) {
     const code = clean(e && e.code ? e.code : 'error');
     return { ok: false, lines: [`guard: AI review failed, blocking (${code}): ${mask(clean(e && e.message ? e.message : ''))}`] };

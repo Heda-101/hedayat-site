@@ -55,3 +55,115 @@ test('pushRange: new branch, deletion, update', () => {
   assert.deepEqual(pushRange({ localSha: 'a'.repeat(40), remoteSha: 'b'.repeat(40) }),
     { kind: 'range', revs: ['b'.repeat(40) + '..' + 'a'.repeat(40)] });
 });
+
+// ---------- R22: AI review input batched by commit ----------
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { reviewBatchesForPush } from '../../scripts/guard/scope.mjs';
+
+const tmpDirs = [];
+test.after(() => { for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true }); });
+function sh(cwd, args) {
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  if (r.status !== 0) assert.fail(`git ${args[0]} failed: ${r.stderr}`);
+  return r.stdout;
+}
+function batchRepo() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-batch-'));
+  tmpDirs.push(dir);
+  sh(dir, ['init', '-q', '-b', 'main']);
+  sh(dir, ['config', 'user.name', 'Test']);
+  sh(dir, ['config', 'user.email', 'test@example.invalid']);
+  sh(dir, ['config', 'commit.gpgsign', 'false']);
+  sh(dir, ['config', 'core.hooksPath', '/dev/null']);
+  fs.writeFileSync(path.join(dir, 'a.md'), 'base\n');
+  sh(dir, ['add', 'a.md']);
+  sh(dir, ['commit', '-q', '-m', 'base']);
+  return dir;
+}
+const filler = (bytes, tag) => `${tag} filler line for the batch tests\n`.repeat(Math.ceil(bytes / 40));
+function commit(dir, files, msg) {
+  for (const [name, content] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
+    fs.writeFileSync(path.join(dir, name), content);
+    sh(dir, ['add', name]);
+  }
+  sh(dir, ['commit', '-q', '-m', msg]);
+}
+const head = (dir) => sh(dir, ['rev-parse', 'HEAD']).trim();
+const refsFor = (dir, base) => [{ localRef: 'refs/heads/main', localSha: head(dir), remoteRef: 'refs/heads/main', remoteSha: base }];
+const tooLarge = (e) => e.code === 'AI_TOO_LARGE' && /split this push/.test(e.message);
+
+test('R22: a small push is one batch with every commit, message included', () => {
+  const dir = batchRepo();
+  const base = head(dir);
+  commit(dir, { 'b.md': 'bee\n' }, 'first change');
+  commit(dir, { 'c.md': 'sea\n' }, 'second change');
+  const b = reviewBatchesForPush(refsFor(dir, base), dir);
+  assert.equal(b.length, 1);
+  assert.match(b[0].diff, /first change/);
+  assert.match(b[0].diff, /\+sea/);
+  assert.doesNotMatch(b[0].diff, /\+base/);
+});
+
+test('R22: commits are packed whole into batches of at most 200 KB', () => {
+  const dir = batchRepo();
+  const base = head(dir);
+  for (const n of [1, 2, 3]) commit(dir, { [`f${n}.md`]: filler(80_000, `c${n}`) }, `commit ${n}`);
+  const b = reviewBatchesForPush(refsFor(dir, base), dir);
+  assert.equal(b.length, 2);
+  for (const x of b) assert.ok(Buffer.byteLength(x.diff) <= 200_000);
+  assert.match(b[0].diff, /commit 1/);
+  assert.match(b[0].diff, /commit 2/);
+  assert.match(b[1].diff, /commit 3/);
+});
+
+test('R22: a commit over the cap is split by file; one file over the cap blocks', () => {
+  const dir = batchRepo();
+  const base = head(dir);
+  commit(dir, { 'x.md': filler(120_000, 'x'), 'y.md': filler(120_000, 'y') }, 'two big files');
+  const b = reviewBatchesForPush(refsFor(dir, base), dir);
+  assert.equal(b.length, 2);
+  assert.match(b[0].diff, /two big files/);
+  assert.match(b[1].diff, /two big files/);
+  assert.ok(b.every((x) => Buffer.byteLength(x.diff) <= 200_000));
+  commit(dir, { 'z.md': filler(250_000, 'z') }, 'one huge file');
+  assert.throws(() => reviewBatchesForPush(refsFor(dir, base), dir), tooLarge);
+});
+
+test('R22: more than 10 batches blocks with split this push', () => {
+  const dir = batchRepo();
+  const base = head(dir);
+  for (let n = 0; n < 11; n++) commit(dir, { [`g${n}.md`]: filler(150_000, `g${n}`) }, `big ${n}`);
+  assert.throws(() => reviewBatchesForPush(refsFor(dir, base), dir), tooLarge);
+});
+
+test('R22: lockfiles are left out of the AI input only', () => {
+  const dir = batchRepo();
+  const base = head(dir);
+  commit(dir, {
+    'package-lock.json': filler(300_000, 'npm'), 'web/pnpm-lock.yaml': filler(1000, 'pnpm'),
+    'yarn.lock': filler(1000, 'yarn'), 'Gemfile.lock': filler(1000, 'gem'), 'src/app.md': 'real change\n',
+  }, 'deps and app');
+  const b = reviewBatchesForPush(refsFor(dir, base), dir);
+  assert.equal(b.length, 1);
+  assert.match(b[0].diff, /\+real change/);
+  assert.match(b[0].diff, /deps and app/);
+  assert.doesNotMatch(b[0].diff, /npm filler|pnpm filler|yarn filler|gem filler/);
+});
+
+test('R22: binary paths are listed with the batch of their commit', () => {
+  const dir = batchRepo();
+  const base = head(dir);
+  commit(dir, { 'p.png': Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2]) }, 'picture');
+  const b = reviewBatchesForPush(refsFor(dir, base), dir);
+  assert.deepEqual(b[0].binaryPaths, ['p.png']);
+});
+
+test('R22: an empty push has no batches; a deleted ref is skipped', () => {
+  const dir = batchRepo();
+  assert.deepEqual(reviewBatchesForPush(refsFor(dir, head(dir)), dir), []);
+  assert.deepEqual(reviewBatchesForPush([{ localRef: '(delete)', localSha: Z, remoteRef: 'refs/heads/x', remoteSha: head(dir) }], dir), []);
+});

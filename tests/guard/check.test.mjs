@@ -485,3 +485,67 @@ test('ci: term in a commit message or path blocks; missing args fail closed', ()
   assert.match(r.out, /blocked-term #1 at commit [0-9a-f]+ message/);
   assert.equal(check(dir, ['ci']).status, 1);
 });
+
+// ---- R22: the pre-push AI review runs in batches ----
+// A reviewer that records each call's input, then behaves like the pass fixture
+// (or like the block fixture on call number blockOn).
+function countingReviewer(blockOn = 0) {
+  const d = tmp('guard-count-');
+  const f = path.join(d, 'reviewer.sh');
+  fs.writeFileSync(f, [
+    '#!/bin/sh',
+    `d='${d}'`,
+    'n=$(ls "$d" | grep -c "^in\\.")',
+    'n=$((n + 1))',
+    'cat >"$d/in.$n"',
+    `if [ "$n" = "${blockOn}" ]; then exec '${fake('block')}' </dev/null; fi`,
+    `exec '${fake('pass')}' </dev/null`,
+    '',
+  ].join('\n'), { mode: 0o755 });
+  return { cmd: f, calls: () => fs.readdirSync(d).filter((x) => x.startsWith('in.')).length,
+    input: (n) => fs.readFileSync(path.join(d, `in.${n}`), 'utf8') };
+}
+const big = (bytes, tag) => `${tag} filler line for the batch tests\n`.repeat(Math.ceil(bytes / 40));
+function bigPush(files, reviewer, extraEnv = {}) {
+  const dir = mkRepoWithOrigin();
+  const base = rev(dir, 'main');
+  files.forEach((content, n) => {
+    fs.writeFileSync(path.join(dir, `f${n}.md`), content);
+    git(dir, ['add', `f${n}.md`]);
+    git(dir, ['commit', '-q', '-m', `commit ${n}`]);
+  });
+  return check(dir, ['push'], { input: pushLine(dir, 'main', base), env: { CLAUDECODE: '1', GUARD_AI_CMD: reviewer.cmd, ...extraEnv } });
+}
+
+test('R22: a push over 200 KB is reviewed in several batches and passes', () => {
+  const rv = countingReviewer();
+  const r = bigPush([big(80_000, 'a'), big(80_000, 'b'), big(80_000, 'c')], rv);
+  assert.equal(r.status, 0, r.out);
+  assert.equal(rv.calls(), 2);
+  assert.match(r.out, /AI review passed \(2 batches\)/);
+});
+
+test('R22: a block in any batch blocks the push', () => {
+  const rv = countingReviewer(2);
+  const r = bigPush([big(80_000, 'a'), big(80_000, 'b'), big(80_000, 'c')], rv);
+  assert.equal(r.status, 1, r.out);
+  assert.equal(rv.calls(), 2);
+  assert.match(r.out, /a\.md:3/);
+  assert.match(r.out, /AI review blocked this push \(batch 2 of 2\)/);
+});
+
+test('R22: a single file over the cap blocks without calling the reviewer', () => {
+  const rv = countingReviewer();
+  const r = bigPush([big(250_000, 'h')], rv);
+  assert.equal(r.status, 1, r.out);
+  assert.equal(rv.calls(), 0);
+  assert.match(r.out, /AI_TOO_LARGE/);
+  assert.match(r.out, /split this push/);
+});
+
+test('R22: the overall AI deadline covers all batches', () => {
+  const r = bigPush([big(80_000, 'a'), big(80_000, 'b'), big(80_000, 'c')], { cmd: fake('slow') },
+    { GUARD_AI_DEADLINE_MS: '1500' });
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /AI review failed/);
+});

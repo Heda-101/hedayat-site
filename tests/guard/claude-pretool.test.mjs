@@ -256,22 +256,16 @@ test('hook exits 0 for a clean push', () => {
   assert.equal(r.status, 0, r.out);
 });
 
-test('hook exits 2 when the AI review blocks, printing file:line and reason', () => {
+// R22: the AI review runs in the pre-push hook (R18a), not here, so the hook never calls the reviewer.
+test('hook leaves the AI review to pre-push: any reviewer verdict passes the hook', () => {
   const dir = repo();
   commitFile(dir, 'b.md', 'clean words\n');
-  const r = hook(bash('git push', dir), { ai: 'block' });
-  assert.equal(r.status, 2, r.out);
-  assert.match(r.out, /a\.md:3/);
-  assert.match(r.out, /identifies a client/);
-});
-
-test('hook exits 2 when the AI review errors or returns garbage', () => {
-  const dir = repo();
-  commitFile(dir, 'b.md', 'clean words\n');
-  for (const ai of ['fail', 'garbage']) {
+  for (const ai of ['block', 'fail', 'garbage', 'slow']) {
+    const t0 = Date.now();
     const r = hook(bash('git push origin feat/x', dir), { ai });
-    assert.equal(r.status, 2, r.out);
-    assert.match(r.out, /AI review/i);
+    assert.equal(r.status, 0, `${ai}: ${r.out}`);
+    assert.doesNotMatch(r.out, /AI review (passed|blocked|failed)/i, ai);
+    assert.ok(Date.now() - t0 < 4000, `${ai}: hook must not wait for a reviewer`);
   }
 });
 
@@ -283,15 +277,6 @@ test('hook exits 2 on a blocked term without printing it, and never calls the AI
   assert.match(r.out, /blocked-term #1 at b\.md:2/);
   assert.doesNotMatch(r.out, /acme/i);
   assert.doesNotMatch(r.out, /AI review/i);
-});
-
-test('hook masks blocked terms inside AI findings', () => {
-  const dir = repo();
-  commitFile(dir, 'b.md', 'clean words\n');
-  const r = hook(bash('git push', dir), { ai: 'block', terms: termsFile('word:client\n') });
-  assert.equal(r.status, 2, r.out);
-  assert.match(r.out, /a\.md:3/);
-  assert.doesNotMatch(r.out, /client/i);
 });
 
 test('hook blocks any new image because agents cannot confirm', () => {
@@ -362,14 +347,21 @@ test('hook denies when git would push somewhere other than origin/<branch>', () 
   assert.match(r.out, /mirror/);
 });
 
+// A gitleaks stand-in that hangs, to exercise the hook's deadline.
+function slowGitleaksPath() {
+  const d = tmp('guard-slowbin-');
+  fs.writeFileSync(path.join(d, 'gitleaks'), '#!/bin/sh\nsleep 5\n', { mode: 0o755 });
+  return `${d}:${process.env.PATH}`;
+}
+
 test('hook exits 2 when its internal deadline is reached', () => {
   const dir = repo();
   commitFile(dir, 'b.md', 'clean words\n');
   const t0 = Date.now();
-  const r = hook(bash('git push', dir), { ai: 'slow', env: { GUARD_HOOK_DEADLINE_MS: '1500' } });
+  const r = hook(bash('git push', dir), { env: { PATH: slowGitleaksPath(), GUARD_HOOK_DEADLINE_MS: '1500' } });
   assert.equal(r.status, 2, r.out);
   assert.match(r.out, /deadline/i);
-  assert.ok(Date.now() - t0 < 4500, 'hook should not wait for the slow reviewer');
+  assert.ok(Date.now() - t0 < 4500, 'hook should not wait for the slow scan');
 });
 
 test('hook deadline override can only shorten the 480 s default', () => {
