@@ -17,6 +17,9 @@ printf '%s\n' "$TERM_TEXT" >"$WORK/terms.txt"
 FAILS=0
 N=0
 
+# Every command below runs against the selftest's own terms file, never the developer's real one.
+export GUARD_TERMS_FILE="$WORK/terms.txt" GUARD_AI_CMD="$FIX/fake-claude-pass.sh" GUARD_TTY=/nonexistent
+
 # Git must not pick up the developer's own config; Claude Code must be off unless a case turns it on.
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
 unset CLAUDECODE
