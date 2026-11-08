@@ -1,4 +1,4 @@
-# hedayattabesh.com — Phase 1 Design
+# hedayat.dev — Phase 1 Design
 
 Date: 2026-10-26 · Owner: Hedayat Tabesh · Status: draft for review
 
@@ -81,7 +81,7 @@ Build order (the stack is decided separately, §7):
 | Scroll animation | GSAP + ScrollTrigger, reduced-motion fallbacks |
 | Styling | CSS custom-property design tokens + Astro scoped CSS (no Tailwind) |
 | Hosting | Cloudflare (Pages/Workers), PR preview deploys |
-| Domain | hedayattabesh.com via Cloudflare Registrar. WHOIS showed it unregistered on 26 Oct 2026; register before the pipeline PR. Fallback: htabesh.dev |
+| Domain | **hedayat.dev** (Hedayat's call, 8 Nov 2026: the .dev suits the build-in-public idea). hedayattabesh.com is also registered and 301-redirects to hedayat.dev with the path kept, so the full name still works and stays protected. Both are on Cloudflare. .dev is HSTS-preloaded, so the site is HTTPS-only. |
 | Repo | GitHub, public from day one (free plan), protected main, PR-only, pre-push safety net (§5) + CI secret scanning (gitleaks) + GitHub push protection |
 | Quality checks | GitHub Actions: type check, Vitest, Playwright + axe, Lighthouse CI on built output, gitleaks |
 | Live numbers | Pipeline writes `stats.json` published beside the site; page fetches it at load and shows run date + link to run; designed fallback if it fails |
