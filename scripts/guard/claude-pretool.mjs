@@ -667,9 +667,14 @@ async function pushFlow(cwd, branch) {
 
   const localSha = git(['rev-parse', '--verify', 'HEAD^{commit}'], cwd).trim();
   // No remote sha here: a local origin/<branch> can be stale (deleted on the server), so the
-  // checks cover every commit not on origin's live branch and tag tips (git ls-remote).
+  // checks cover every commit not on the live branch and tag tips (git ls-remote) of each URL
+  // git pushes origin to. That is the push URL (pushurl, pushInsteadOf), never the fetch URL,
+  // which can be a different repository.
+  let pushUrls = [];
+  try { pushUrls = git(['remote', 'get-url', '--push', '--all', 'origin'], cwd).split('\n').map((u) => u.trim()).filter(Boolean); }
+  catch { pushUrls = []; }
+  if (pushUrls.length === 0) block("guard: could not read origin's push URL, blocking");
   const ref = `refs/heads/${branch}`;
-  const refs = [{ localRef: ref, localSha, remoteRef: ref, remoteSha: Z, remote: 'origin' }];
 
   // Make sure git would push exactly this branch to origin/<branch>.
   const cfg = (key) => { try { return git(['config', '--get', key], cwd).trim(); } catch { return ''; } };
@@ -680,11 +685,14 @@ async function pushFlow(cwd, branch) {
   try { pushTarget = git(['rev-parse', '--abbrev-ref', `${branch}@{push}`], cwd).trim(); } catch { pushTarget = ''; }
   if (pushTarget && pushTarget !== `origin/${branch}`) block(`guard: this branch pushes to ${mask(clean(pushTarget))}; ${PUSH_ONLY}`);
 
-  const checks = runPushChecks(refs, { cwd, terms }); // no tty: any new image blocks
-  if (!checks.ok) {
-    const lines = checks.lines.map((l) => `guard: ${l.replace(/^guard: /, '')}`);
-    if (checks.images.length) lines.push('guard: Hedayat must push image changes himself');
-    block(lines);
+  for (const url of pushUrls) {
+    const refs = [{ localRef: ref, localSha, remoteRef: ref, remoteSha: Z, remote: url }];
+    const checks = runPushChecks(refs, { cwd, terms }); // no tty: any new image or binary blocks
+    if (!checks.ok) {
+      const lines = checks.lines.map((l) => `guard: ${l.replace(/^guard: /, '')}`);
+      if (checks.images.length) lines.push('guard: Hedayat must push image and binary file changes himself');
+      block(lines);
+    }
   }
 
   // The AI review follows in the pre-push hook of the push itself (R18a, R22).

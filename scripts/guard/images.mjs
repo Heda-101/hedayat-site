@@ -28,15 +28,30 @@ function parseNameStatus(out) {
   return paths;
 }
 
-// Image files added, modified, type-changed or renamed/copied to anywhere in the pushed ranges.
-// Throws on any git error.
-export function newImagesInPush(refs, cwd = process.cwd()) {
+// Paths git's diff calls binary (numstat "-\t-") anywhere in the range, with renames off so a
+// moved file shows under its new name.
+function binaryPathsIn(revs, cwd) {
+  const out = git(['log', '-m', '--numstat', '-z', '--format=', '--no-renames', '--no-textconv', '--no-ext-diff', ...revs], cwd);
+  const found = new Set();
+  for (const entry of out.split('\0')) {
+    const m = /^\n*(-|\d+)\t(-|\d+)\t([\s\S]*)$/.exec(entry);
+    if (m && m[1] === '-' && m[2] === '-') found.add(m[3]);
+  }
+  return found;
+}
+
+// Files a human must confirm (R23): images, and any other file git treats as binary (NUL bytes,
+// UTF-16, PDFs ...), that were added, modified, type-changed or renamed/copied to anywhere in the
+// pushed ranges. The term scan and the AI review cannot read them. Throws on any git error.
+export function heldFilesInPush(refs, cwd = process.cwd()) {
   const found = new Set();
   for (const ref of refs) {
     const range = effectiveRevs(ref, cwd);
     if (range.kind === 'delete') continue;
     const out = git(['log', '-m', '-M', '-C', '--name-status', '-z', '--format=', ...range.revs], cwd);
-    for (const p of parseNameStatus(out)) if (isImagePath(p)) found.add(p);
+    const changed = parseNameStatus(out);
+    const binaries = binaryPathsIn(range.revs, cwd);
+    for (const p of changed) if (isImagePath(p) || binaries.has(p)) found.add(p);
   }
   return [...found];
 }
@@ -56,8 +71,8 @@ export function confirmImages(paths, tty = '/dev/tty') {
   let fd;
   try {
     fd = fs.openSync(tty, 'r');
-    process.stderr.write(`New images in this push:\n${paths.map((p) => `  ${p}\n`).join('')}`);
-    process.stderr.write('Confirm these images contain no client or confidential content [y/N] ');
+    process.stderr.write(`New images or binary files in this push:\n${paths.map((p) => `  ${p}\n`).join('')}`);
+    process.stderr.write('Confirm these images and binary files contain no client or confidential content [y/N] ');
     return /^\s*y\s*$/i.test(readLine(fd));
   } catch {
     return false;

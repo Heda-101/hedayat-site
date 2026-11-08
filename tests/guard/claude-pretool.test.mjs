@@ -289,7 +289,7 @@ test('hook blocks any new image because agents cannot confirm', () => {
   const r = hook(bash('git push', dir), { env: { GUARD_TTY: yes } });
   assert.equal(r.status, 2, r.out);
   assert.match(r.out, /p\.png/);
-  assert.match(r.out, /Hedayat must push image changes himself/);
+  assert.match(r.out, /Hedayat must push image and binary file changes himself/);
 });
 
 test('hook blocks a push when the terms file is missing', () => {
@@ -328,6 +328,26 @@ test('F1: hook checks against the live origin, not a stale tracking ref', () => 
   assert.equal(r.status, 2, r.out);
   assert.match(r.out, /blocked-term #1 at b\.md:1/);
   assert.doesNotMatch(r.out, /acme/i);
+});
+
+test('F1 fix 1: hook lists origin\'s push URL, not its fetch URL', () => {
+  const dir = repo();
+  const origin = gitIn(dir, ['remote', 'get-url', 'origin']).trim();
+  const mirror = tmp('guard-hookmirror-');
+  gitIn(mirror, ['init', '-q', '--bare', '-b', 'main']);
+  commitFile(dir, 'b.md', 'Acme Corp\n');
+  gitIn(dir, ['push', '-q', mirror, 'feat/x']); // the mirror has the commit, origin does not
+  gitIn(dir, ['remote', 'set-url', 'origin', mirror]);
+  gitIn(dir, ['remote', 'set-url', '--push', 'origin', origin]);
+  const r = hook(bash('git push -u origin feat/x', dir));
+  assert.equal(r.status, 2, r.out);
+  assert.match(r.out, /blocked-term #1 at b\.md:1/);
+  // pushInsteadOf rewrites the push URL the same way
+  gitIn(dir, ['config', '--unset', 'remote.origin.pushurl']);
+  gitIn(dir, ['config', `url.${origin}.pushInsteadOf`, mirror]);
+  const r2 = hook(bash('git push -u origin feat/x', dir));
+  assert.equal(r2.status, 2, r2.out);
+  assert.match(r2.out, /blocked-term #1 at b\.md:1/);
 });
 
 test('F1: hook blocks a push when origin cannot be listed', () => {

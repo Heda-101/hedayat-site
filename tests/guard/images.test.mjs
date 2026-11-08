@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { isImagePath, newImagesInPush, confirmImages } from '../../scripts/guard/images.mjs';
+import { isImagePath, heldFilesInPush, confirmImages } from '../../scripts/guard/images.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const CHECK = path.join(ROOT, 'scripts/guard/check.mjs');
@@ -88,24 +88,24 @@ test('confirmImages: y confirms, empty/other/missing tty do not', () => {
   assert.equal(confirmImages(['x.png'], '/nonexistent/tty'), false);
 });
 
-test('newImagesInPush: added, renamed-to, spaced and non-ASCII paths; ignores non-images', () => {
+test('heldFilesInPush: added, renamed-to, spaced and non-ASCII paths; ignores non-images', () => {
   const dir = mkRepo();
   const base = head(dir);
   commitFiles(dir, { 'pics/one two.png': 'p1', 'pics/café.JPG': 'p2', 'doc.md': 'm', 'old.txt': 'o' });
   git(dir, ['mv', 'old.txt', 'moved.svg']);
   git(dir, ['commit', '-q', '-m', 'rename']);
-  const found = newImagesInPush([refFor(dir, base)], dir).sort();
+  const found = heldFilesInPush([refFor(dir, base)], dir).sort();
   assert.deepEqual(found, ['moved.svg', 'pics/café.JPG', 'pics/one two.png']);
 });
 
-test('newImagesInPush: a deleted image, a deletion push and a clean push add none', () => {
+test('heldFilesInPush: a deleted image, a deletion push and a clean push add none', () => {
   const dir = mkRepo();
   commitFiles(dir, { 'gone.png': 'p' });
   const base = head(dir);
   git(dir, ['rm', '-q', 'gone.png']);
   git(dir, ['commit', '-q', '-m', 'rm']);
-  assert.deepEqual(newImagesInPush([refFor(dir, base)], dir), []);
-  assert.deepEqual(newImagesInPush([{ localRef: '(delete)', localSha: Z, remoteRef: 'refs/heads/x', remoteSha: base }], dir), []);
+  assert.deepEqual(heldFilesInPush([refFor(dir, base)], dir), []);
+  assert.deepEqual(heldFilesInPush([{ localRef: '(delete)', localSha: Z, remoteRef: 'refs/heads/x', remoteSha: base }], dir), []);
 });
 
 test('F3: a modified or type-changed image is held too', () => {
@@ -113,24 +113,24 @@ test('F3: a modified or type-changed image is held too', () => {
   commitFiles(dir, { 'old.png': 'first', 'kind.png': 'regular' });
   const base = head(dir);
   commitFiles(dir, { 'old.png': 'replaced with a different picture' }, 'modify');
-  assert.deepEqual(newImagesInPush([refFor(dir, base)], dir), ['old.png']);
+  assert.deepEqual(heldFilesInPush([refFor(dir, base)], dir), ['old.png']);
   fs.rmSync(path.join(dir, 'kind.png'));
   fs.symlinkSync('old.png', path.join(dir, 'kind.png'));
   git(dir, ['add', 'kind.png']);
   git(dir, ['commit', '-q', '-m', 'type change']);
-  assert.deepEqual(newImagesInPush([refFor(dir, base)], dir).sort(), ['kind.png', 'old.png']);
+  assert.deepEqual(heldFilesInPush([refFor(dir, base)], dir).sort(), ['kind.png', 'old.png']);
   const r = runPush(dir, refFor(dir, base), { GUARD_TTY: '/nonexistent' });
   assert.equal(r.status, 1);
   assert.match(r.stdout, /image needs confirmation: old\.png/);
 });
 
-test('newImagesInPush: unknown remote sha falls back to commits not on the live remote', () => {
+test('heldFilesInPush: unknown remote sha falls back to commits not on the live remote', () => {
   const dir = mkRepo();
   const origin = tmp('img-origin-');
   git(origin, ['init', '-q', '--bare', '-b', 'main']);
   git(dir, ['push', '-q', origin, 'main']);
   commitFiles(dir, { 'x.png': 'p' });
-  const found = newImagesInPush([{ ...refFor(dir, 'f'.repeat(40)), remote: origin }], dir);
+  const found = heldFilesInPush([{ ...refFor(dir, 'f'.repeat(40)), remote: origin }], dir);
   assert.deepEqual(found, ['x.png']);
 });
 
@@ -150,6 +150,40 @@ test('check push: new image passes when confirmed, blocks when declined', () => 
   const ref = refFor(dir, base);
   assert.equal(runPush(dir, ref, { GUARD_TTY: tty('y\n') }).status, 0);
   assert.equal(runPush(dir, ref, { GUARD_TTY: tty('n\n') }).status, 1);
+});
+
+// R23: binaries the term scan and the AI cannot read (NUL bytes, UTF-16, PDFs) are held like images.
+test('R23: new or modified non-image binaries are held; deleted ones and plain text are not', () => {
+  const dir = mkRepo();
+  commitFiles(dir, { 'old.bin': Buffer.from([1, 0, 2]), 'gone.dat': Buffer.from([3, 0, 4]) });
+  const base = head(dir);
+  const utf16 = Buffer.from('﻿notes in utf sixteen\n', 'utf16le');
+  commitFiles(dir, { 'nul.txt': Buffer.from('head\0 hidden words\n'), 'u16.txt': utf16, 'old.bin': Buffer.from([5, 0, 6]),
+    'doc.pdf': Buffer.from('%PDF-1.4\n\0\0 body'), 'plain.md': 'just text\n' });
+  git(dir, ['rm', '-q', 'gone.dat']);
+  git(dir, ['commit', '-q', '-m', 'rm']);
+  assert.deepEqual(heldFilesInPush([refFor(dir, base)], dir).sort(), ['doc.pdf', 'nul.txt', 'old.bin', 'u16.txt']);
+});
+
+test('R23: check push holds a NUL-byte .txt and a UTF-16 file without a tty; y confirms', () => {
+  const dir = mkRepo();
+  const base = head(dir);
+  commitFiles(dir, { 'nul.txt': Buffer.from('a\0b\n'), 'u16.txt': Buffer.from('﻿hello\n', 'utf16le') });
+  const ref = refFor(dir, base);
+  const r = runPush(dir, ref, { GUARD_TTY: '/nonexistent' });
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /binary file needs confirmation: nul\.txt/);
+  assert.match(r.stdout, /binary file needs confirmation: u16\.txt/);
+  assert.equal(runPush(dir, ref, { GUARD_TTY: tty('y\n') }).status, 0);
+  assert.equal(runPush(dir, ref, { GUARD_TTY: tty('n\n') }).status, 1);
+});
+
+test('R23: the prompt names images and binary files', () => {
+  const f = tty('n\n');
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e',
+    `const { confirmImages } = await import(${JSON.stringify(path.join(ROOT, 'scripts/guard/images.mjs'))}); confirmImages(['a.bin'], ${JSON.stringify(f)});`],
+  { encoding: 'utf8' });
+  assert.match(r.stderr, /binary files/);
 });
 
 test('check push: no images means no prompt and pass', () => {

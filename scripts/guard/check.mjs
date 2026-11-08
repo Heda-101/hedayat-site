@@ -4,7 +4,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { loadTerms, findTerms, GuardError, clean } from './terms.mjs';
-import { newImagesInPush, confirmImages } from './images.mjs';
+import { heldFilesInPush, confirmImages, isImagePath } from './images.mjs';
 import { collectStaged, collectPush, collectRange, parsePushRefs, effectiveRevs, reviewBatchesForPush } from './scope.mjs';
 import { reviewDiff, REVIEW_TIMEOUT_MS } from './ai-review.mjs';
 
@@ -89,7 +89,7 @@ function runGitleaks(args, terms) {
 }
 
 // Deterministic push checks shared by the pre-push hook and the Claude Code hook.
-// opts: { cwd, terms (loaded via loadGuardTerms when absent), tty (no tty = new images block) }.
+// opts: { cwd, terms (loaded via loadGuardTerms when absent), tty (no tty = new images and binaries block) }.
 // Never throws; returns { ok, lines, images } where lines are already masked.
 export function runPushChecks(refs, opts = {}) {
   const cwd = opts.cwd || process.cwd();
@@ -106,10 +106,14 @@ export function runPushChecks(refs, opts = {}) {
     }
     lines.push(...scanLines(collectPush(refs, cwd), terms));
     if (lines.length > 0) return { ok: false, lines, images };
-    // A term scan cannot read pictures, so a human must confirm any new image (fails closed).
-    images = newImagesInPush(refs, cwd);
+    // A term scan cannot read pictures or other binaries, so a human must confirm each new or
+    // changed one (R23; fails closed).
+    images = heldFilesInPush(refs, cwd);
     if (images.length > 0) {
-      for (const p of images) lines.push(`image needs confirmation: ${safeWhere(`path ${p}`, terms).replace(/^path /, '')}`);
+      for (const p of images) {
+        const kind = isImagePath(p) ? 'image' : 'binary file';
+        lines.push(`${kind} needs confirmation: ${safeWhere(`path ${p}`, terms).replace(/^path /, '')}`);
+      }
       if (!opts.tty || !confirmImages(images, opts.tty)) return { ok: false, lines, images };
     }
     return { ok: true, lines, images };
@@ -184,8 +188,11 @@ async function main(argv) {
       const revs = /^0+$/.test(base) ? [head] : [`${base}..${head}`];
       blocked = scan(collectRange(revs, process.cwd()), terms);
     } else {
-      // pre-push passes the remote (name or URL) first; new branches are checked against it live.
-      const refs = parsePushRefs(fs.readFileSync(0, 'utf8'), arg);
+      // pre-push passes the remote name, then the URL git actually pushes to (after pushurl and
+      // pushInsteadOf). New branches are checked live against that URL: `ls-remote <name>` would
+      // query the fetch URL, which can be a different repository.
+      const url = argv[2];
+      const refs = parsePushRefs(fs.readFileSync(0, 'utf8'), url !== undefined && url !== '' ? url : arg);
       const r = runPushChecks(refs, { terms, tty: process.env.GUARD_TTY || '/dev/tty' });
       toStdout(r.lines);
       blocked = !r.ok;

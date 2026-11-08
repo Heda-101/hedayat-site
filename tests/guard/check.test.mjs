@@ -219,6 +219,73 @@ test('F1: a stale remote-tracking ref does not hide old commits pushed as a new 
   assert.equal(git(dir, ['ls-remote', '--heads', 'origin', 'leak2']).stdout.trim(), '');
 });
 
+// Fix round 1: the live tips come from the URL git pushes to, not the fetch URL.
+function mirrorLeakRepo() {
+  const dir = mkRepoWithOrigin();
+  const origin = git(dir, ['remote', 'get-url', 'origin']).stdout.trim();
+  const mirror = tmp('guard-mirror-');
+  git(mirror, ['init', '-q', '--bare', '-b', 'main']);
+  git(dir, ['push', '-q', mirror, 'main']);
+  git(dir, ['config', 'core.hooksPath', HOOKS]);
+  const before = { GUARD_TERMS_FILE: termsFile('Unrelated Thing\n') };
+  git(dir, ['checkout', '-q', '-b', 'leak']);
+  fs.writeFileSync(path.join(dir, 'l.md'), 'Acme Corp\n');
+  git(dir, ['add', 'l.md']);
+  git(dir, ['commit', '-q', '-m', 'l'], { env: before });
+  // the mirror already has the commit; the real destination does not
+  git(dir, ['push', '-q', mirror, 'leak'], { env: before });
+  return { dir, origin, mirror };
+}
+const blockedLeak = (r, dir, origin, branch) => {
+  assert.notEqual(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout + r.stderr, /blocked-term #1 at l\.md:1/);
+  assert.doesNotMatch(r.stdout + r.stderr, /acme/i);
+  assert.equal(git(dir, ['ls-remote', '--heads', origin, branch]).stdout.trim(), '');
+};
+
+test('F1 fix 1: a pushurl that differs from the fetch URL is what gets listed', () => {
+  const { dir, origin, mirror } = mirrorLeakRepo();
+  git(dir, ['remote', 'set-url', 'origin', mirror]);
+  git(dir, ['remote', 'set-url', '--push', 'origin', origin]);
+  git(dir, ['checkout', '-q', '-b', 'leak3']);
+  const r = git(dir, ['push', '-q', 'origin', 'leak3'], { env: { GUARD_TERMS_FILE: termsFile() }, allowFail: true });
+  blockedLeak(r, dir, origin, 'leak3');
+});
+
+test('F1 fix 1: url.<x>.pushInsteadOf on a pushed URL is what gets listed', () => {
+  const { dir, origin, mirror } = mirrorLeakRepo();
+  git(dir, ['config', `url.${origin}.pushInsteadOf`, mirror]);
+  git(dir, ['checkout', '-q', '-b', 'leak4']);
+  const r = git(dir, ['push', '-q', mirror, 'leak4'], { env: { GUARD_TERMS_FILE: termsFile() }, allowFail: true });
+  blockedLeak(r, dir, origin, 'leak4');
+});
+
+test('F1 fix 1: check push lists the URL argument over the remote name', () => {
+  const { dir, origin, mirror } = mirrorLeakRepo();
+  git(dir, ['config', '--unset', 'core.hooksPath']);
+  git(dir, ['remote', 'set-url', 'origin', mirror]);
+  const line = pushLine(dir, 'leak');
+  assert.equal(check(dir, ['push', 'origin'], { input: line }).status, 0); // the fetch URL has it
+  const r = check(dir, ['push', 'origin', origin], { input: line });
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /blocked-term #1 at l\.md:1/);
+  assert.equal(check(dir, ['push', 'origin', '--upload-pack=x'], { input: line }).status, 1);
+});
+
+test('F1 fix 2: ls-remote runs with prompts turned off', () => {
+  const dir = mkRepoWithOrigin();
+  const realGit = spawnSync('/bin/sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  const bin = tmp('guard-gitwrap-');
+  const log = path.join(bin, 'log');
+  fs.writeFileSync(path.join(bin, 'git'), `#!/bin/sh\n[ "$1" = ls-remote ] && echo "prompt=$GIT_TERMINAL_PROMPT gcm=$GCM_INTERACTIVE" >>"${log}"\nexec "${realGit}" "$@"\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(dir, 'n.md'), 'clean\n');
+  git(dir, ['add', 'n.md']);
+  git(dir, ['commit', '-q', '-m', 'n']);
+  const r = check(dir, ['push', 'origin'], { input: pushLine(dir, 'main'), env: { PATH: `${bin}:${process.env.PATH}`, GIT_TERMINAL_PROMPT: '1' } });
+  assert.equal(r.status, 0, r.out);
+  assert.match(fs.readFileSync(log, 'utf8'), /^prompt=0 gcm=never$/m);
+});
+
 test('F1: a new branch or an unknown remote tip blocks when the remote cannot be listed', () => {
   const dir = mkRepoWithOrigin();
   fs.writeFileSync(path.join(dir, 'n.md'), 'clean\n');

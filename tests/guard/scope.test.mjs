@@ -212,6 +212,16 @@ test('F2: a modified 250 KB image keeps the AI diff small', () => {
   assert.deepEqual(b[0].binaryPaths, ['pic.png']);
 });
 
+test('F2 fix 4: a deleted binary is not listed in binaryPaths', () => {
+  const dir = batchRepo();
+  commit(dir, { 'gone.png': Buffer.from([0x89, 0x50, 0, 0, 1]), 'stay.png': Buffer.from([0x89, 0, 2]) }, 'add');
+  const base = head(dir);
+  sh(dir, ['rm', '-q', 'gone.png']);
+  commit(dir, { 'stay.png': Buffer.from([0x89, 0, 3]) }, 'drop one, change one');
+  const b = reviewBatchesForPush(refsFor(dir, base), dir);
+  assert.deepEqual(b[0].binaryPaths, ['stay.png']);
+});
+
 test('R22: an empty push has no batches; a deleted ref is skipped', () => {
   const dir = batchRepo();
   assert.deepEqual(reviewBatchesForPush(refsFor(dir, head(dir)), dir), []);

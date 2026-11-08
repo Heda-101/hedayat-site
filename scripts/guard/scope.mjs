@@ -74,8 +74,10 @@ export function liveRemoteTips(remote, cwd) {
   if (typeof remote !== 'string' || remote === '' || remote.startsWith('-')) throw new GuardError('REMOTE_UNLISTED', NO_LIST);
   let out;
   try {
+    // never prompt for credentials: fail fast (and closed) instead of waiting on a hidden prompt
     out = execFileSync('git', ['ls-remote', remote], {
       cwd, encoding: 'utf8', maxBuffer: MAX, timeout: LS_REMOTE_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' },
     });
   } catch {
     throw new GuardError('REMOTE_UNLISTED', NO_LIST);
@@ -201,14 +203,14 @@ function binaryPathsOf(sha, opts, cwd) {
   return out;
 }
 
-// True when git would call the file binary on content alone (no .gitattributes). A path gone
-// from the commit (a deletion) counts as binary: there is no new content to show.
+// True when git would call the file binary on content alone (no .gitattributes); null when the
+// path is gone from the commit (a deletion: there is no new content to show or list).
 function contentIsBinary(sha, p, cwd) {
   let blob;
   try {
     blob = execFileSync('git', ['cat-file', 'blob', `${sha}:${p}`], { cwd, maxBuffer: MAX, stdio: ['ignore', 'pipe', 'ignore'] });
   } catch (e) {
-    if (typeof e.status === 'number') return true;
+    if (typeof e.status === 'number') return null;
     throw e;
   }
   return blob.subarray(0, FIRST_FEW_BYTES).includes(0);
@@ -217,10 +219,9 @@ function contentIsBinary(sha, p, cwd) {
 // Diff options for one commit. A text file that .gitattributes marks binary (-diff, binary)
 // must not hide from the AI, so any such file puts the whole commit back on --text.
 function diffOptsFor(sha, cwd) {
-  const binaries = binaryPathsOf(sha, BASE_DIFF_OPTS, cwd);
-  const real = binaries.filter((p) => contentIsBinary(sha, p, cwd));
-  const opts = real.length < binaries.length ? [...BASE_DIFF_OPTS, '--text'] : BASE_DIFF_OPTS;
-  return { opts, binaryPaths: real };
+  const kinds = binaryPathsOf(sha, BASE_DIFF_OPTS, cwd).map((p) => [p, contentIsBinary(sha, p, cwd)]);
+  const opts = kinds.some(([, bin]) => bin === false) ? [...BASE_DIFF_OPTS, '--text'] : BASE_DIFF_OPTS;
+  return { opts, binaryPaths: kinds.filter(([, bin]) => bin === true).map(([p]) => p) };
 }
 
 // One commit as review units: the whole commit, or (when over the cap) its header plus one file each.

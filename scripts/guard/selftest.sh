@@ -135,6 +135,16 @@ git -C "$WORK/l1-origin.git" branch -q -D stale-src
 git -C "$R" checkout -q -b stale-dst stale-src
 out="$(run_env git -C "$R" push -q origin stale-dst 2>&1)"; expect "layer 1" "stale tracking ref does not hide a new-branch push" 1 $? "$out"
 
+# The live tips come from the push URL: a fetch URL that already has the commit must not count.
+git init -q --bare -b main "$WORK/l1-mirror.git"
+TERMS="$WORK/other-terms.txt" run_env git -C "$R" push -q "$WORK/l1-mirror.git" stale-src >/dev/null 2>&1
+git -C "$R" remote set-url origin "$WORK/l1-mirror.git"
+git -C "$R" remote set-url --push origin "$WORK/l1-origin.git"
+git -C "$R" checkout -q -b mirror-dst stale-src
+out="$(run_env git -C "$R" push -q origin mirror-dst 2>&1)"; expect "layer 1" "a fetch URL that has the commit does not hide a push to the push URL" 1 $? "$out"
+git -C "$R" config --unset remote.origin.pushurl
+git -C "$R" remote set-url origin "$WORK/l1-origin.git"
+
 # ------------------------------------------------------------------ layer 2
 mkrepo l2 || { echo "FAIL setup: could not build the temp repo"; exit 1; }
 R="$WORK/l2"
