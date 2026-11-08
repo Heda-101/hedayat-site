@@ -1,0 +1,69 @@
+name: guard
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install gitleaks 8.30.1 (checksum verified)
+        run: |
+          set -euo pipefail
+          version=8.30.1
+          sha256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          archive="gitleaks_${version}_linux_x64.tar.gz"
+          dir="$(mktemp -d)"
+          curl -fsSL -o "$dir/$archive" "https://github.com/gitleaks/gitleaks/releases/download/v${version}/${archive}"
+          echo "${sha256}  $dir/$archive" | sha256sum -c -
+          tar -xzf "$dir/$archive" -C "$dir" gitleaks
+          sudo install -m 0755 "$dir/gitleaks" /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Secret scan (gitleaks)
+        run: gitleaks git --redact --no-banner
+
+      - name: Guard unit tests
+        run: npm run test:guard
+
+      - name: Guard self-test
+        run: npm run guard:selftest
+
+      - name: Blocked-terms scan
+        env:
+          BLOCKED_TERMS: ${{ secrets.BLOCKED_TERMS }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_HEAD: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BLOCKED_TERMS" ]; then
+            echo "BLOCKED_TERMS secret not set"
+            exit 1
+          fi
+          terms_file="$(mktemp)"
+          trap 'rm -f "$terms_file"' EXIT
+          printf '%s\n' "$BLOCKED_TERMS" > "$terms_file"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            BASE="$PR_BASE"; HEAD="$PR_HEAD"
+          else
+            BASE="$PUSH_BEFORE"; HEAD="$PUSH_HEAD"
+          fi
+          # A new branch push has an all-zero "before": scan everything reachable from the head.
+          GUARD_TERMS_FILE="$terms_file" node scripts/guard/check.mjs ci "$BASE" "$HEAD"
