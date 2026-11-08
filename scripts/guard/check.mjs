@@ -114,7 +114,9 @@ export function runPushChecks(refs, opts = {}) {
     }
     return { ok: true, lines, images };
   } catch (e) {
-    lines.push(`guard: scan failed, blocking (${e && e.code ? e.code : 'error'})`);
+    // GuardError messages are written to be safe to print; anything else shows only its code.
+    if (e instanceof GuardError) lines.push(`guard: ${e.message}`);
+    else lines.push(`guard: scan failed, blocking (${e && e.code ? e.code : 'error'})`);
     return { ok: false, lines, images };
   }
 }
@@ -163,7 +165,7 @@ export async function agentReview(refs, terms, cwd = process.cwd()) {
 
 async function main(argv) {
   const [mode, arg] = argv;
-  if (!['staged', 'message', 'push', 'ci'].includes(mode)) fail('usage: check.mjs staged | message <file> | push | ci <baseSha> <headSha>');
+  if (!['staged', 'message', 'push', 'ci'].includes(mode)) fail('usage: check.mjs staged | message <file> | push <remote> [<url>] | ci <baseSha> <headSha>');
   const terms = loadOrDie();
   let blocked = false;
   try {
@@ -182,7 +184,8 @@ async function main(argv) {
       const revs = /^0+$/.test(base) ? [head] : [`${base}..${head}`];
       blocked = scan(collectRange(revs, process.cwd()), terms);
     } else {
-      const refs = parsePushRefs(fs.readFileSync(0, 'utf8'));
+      // pre-push passes the remote (name or URL) first; new branches are checked against it live.
+      const refs = parsePushRefs(fs.readFileSync(0, 'utf8'), arg);
       const r = runPushChecks(refs, { terms, tty: process.env.GUARD_TTY || '/dev/tty' });
       toStdout(r.lines);
       blocked = !r.ok;

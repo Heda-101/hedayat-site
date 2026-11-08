@@ -46,6 +46,13 @@ function mkRepo() {
   return dir;
 }
 
+// An empty bare repository to name as the push remote (it has no branch or tag tips).
+function bareRemote() {
+  const d = tmp('guard-bare-');
+  git(d, ['init', '-q', '--bare', '-b', 'main']);
+  return d;
+}
+
 function mkRepoWithOrigin() {
   const dir = mkRepo();
   const origin = tmp('guard-origin-');
@@ -119,7 +126,7 @@ test('push: term in a renamed path blocks', () => {
   const base = rev(dir, 'main');
   git(dir, ['mv', 'a.md', 'acme-corp.md']);
   git(dir, ['commit', '-q', '-m', 'rename']);
-  const r = check(dir, ['push'], { input: pushLine(dir, 'main', base) });
+  const r = check(dir, ['push', 'origin'], { input: pushLine(dir, 'main', base) });
   assert.equal(r.status, 1);
   assert.match(r.out, /blocked-term #1 at path/);
   assert.doesNotMatch(r.out, /acme/i);
@@ -131,7 +138,7 @@ test('push: term in added content and in a commit message block', () => {
   fs.writeFileSync(path.join(dir, 'b.md'), 'x\nAcme Corp\n');
   git(dir, ['add', 'b.md']);
   git(dir, ['commit', '-q', '-m', 'add b']);
-  let r = check(dir, ['push'], { input: pushLine(dir, 'main', base) });
+  let r = check(dir, ['push', 'origin'], { input: pushLine(dir, 'main', base) });
   assert.equal(r.status, 1);
   assert.match(r.out, /blocked-term #1 at b\.md:2/);
 
@@ -140,7 +147,7 @@ test('push: term in added content and in a commit message block', () => {
   fs.writeFileSync(path.join(dir2, 'c.md'), 'fine\n');
   git(dir2, ['add', 'c.md']);
   git(dir2, ['commit', '-q', '-m', 'work for acme corp']);
-  r = check(dir2, ['push'], { input: pushLine(dir2, 'main', base2) });
+  r = check(dir2, ['push', 'origin'], { input: pushLine(dir2, 'main', base2) });
   assert.equal(r.status, 1);
   assert.match(r.out, /blocked-term #1 at commit [0-9a-f]+ message/);
   assert.doesNotMatch(r.out, /acme/i);
@@ -149,7 +156,7 @@ test('push: term in added content and in a commit message block', () => {
 test('push: term in branch name blocks', () => {
   const dir = mkRepoWithOrigin();
   git(dir, ['checkout', '-q', '-b', 'feat/acme-corp']);
-  const r = check(dir, ['push'], { input: pushLine(dir, 'feat/acme-corp') });
+  const r = check(dir, ['push', 'origin'], { input: pushLine(dir, 'feat/acme-corp') });
   assert.equal(r.status, 1);
   assert.match(r.out, /blocked-term #1 at branch/);
   assert.doesNotMatch(r.out, /acme/i);
@@ -166,13 +173,13 @@ test('push: new branch (zero remote sha) scans only commits not on any remote', 
   fs.writeFileSync(path.join(dir, 'new.md'), 'clean\n');
   git(dir, ['add', 'new.md']);
   git(dir, ['commit', '-q', '-m', 'new']);
-  const clean = check(dir, ['push'], { input: pushLine(dir, 'feature') });
+  const clean = check(dir, ['push', 'origin'], { input: pushLine(dir, 'feature') });
   assert.equal(clean.status, 0, clean.out);
 
   fs.writeFileSync(path.join(dir, 'bad.md'), 'Acme Corp\n');
   git(dir, ['add', 'bad.md']);
   git(dir, ['commit', '-q', '-m', 'bad']);
-  const bad = check(dir, ['push'], { input: pushLine(dir, 'feature') });
+  const bad = check(dir, ['push', 'origin'], { input: pushLine(dir, 'feature') });
   assert.equal(bad.status, 1);
   assert.match(bad.out, /blocked-term #1 at bad\.md:1/);
 });
@@ -180,13 +187,71 @@ test('push: new branch (zero remote sha) scans only commits not on any remote', 
 test('push: branch deletion passes without scanning', () => {
   const dir = mkRepoWithOrigin();
   const sha = rev(dir, 'main');
-  const r = check(dir, ['push'], { input: `(delete) ${Z} refs/heads/acme-corp ${sha}\n` });
+  const r = check(dir, ['push', 'origin'], { input: `(delete) ${Z} refs/heads/acme-corp ${sha}\n` });
   assert.equal(r.status, 0, r.out);
 });
 
 test('push: empty stdin passes', () => {
   const dir = mkRepoWithOrigin();
-  assert.equal(check(dir, ['push'], { input: '' }).status, 0);
+  assert.equal(check(dir, ['push', 'origin'], { input: '' }).status, 0);
+});
+
+// ---- F1: a new-branch push is checked against the remote's live tips ----
+test('F1: a stale remote-tracking ref does not hide old commits pushed as a new branch', () => {
+  const dir = mkRepoWithOrigin();
+  const origin = git(dir, ['remote', 'get-url', 'origin']).stdout.trim();
+  git(dir, ['config', 'core.hooksPath', HOOKS]);
+  const before = { GUARD_TERMS_FILE: termsFile('Unrelated Thing\n') };
+  git(dir, ['checkout', '-q', '-b', 'leak']);
+  fs.writeFileSync(path.join(dir, 'l.md'), 'Acme Corp\n');
+  git(dir, ['add', 'l.md']);
+  git(dir, ['commit', '-q', '-m', 'l'], { env: before });
+  git(dir, ['push', '-q', 'origin', 'leak'], { env: before });
+  // the branch goes away on the server, but the local origin/leak ref stays
+  git(origin, ['branch', '-q', '-D', 'leak']);
+  assert.equal(rev(dir, 'refs/remotes/origin/leak'), rev(dir, 'leak'));
+  // the term is listed now; the same commit goes out as a new branch
+  git(dir, ['checkout', '-q', '-b', 'leak2']);
+  const r = git(dir, ['push', '-q', 'origin', 'leak2'], { env: { GUARD_TERMS_FILE: termsFile() }, allowFail: true });
+  assert.notEqual(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout + r.stderr, /blocked-term #1 at l\.md:1/);
+  assert.doesNotMatch(r.stdout + r.stderr, /acme/i);
+  assert.equal(git(dir, ['ls-remote', '--heads', 'origin', 'leak2']).stdout.trim(), '');
+});
+
+test('F1: a new branch or an unknown remote tip blocks when the remote cannot be listed', () => {
+  const dir = mkRepoWithOrigin();
+  fs.writeFileSync(path.join(dir, 'n.md'), 'clean\n');
+  git(dir, ['add', 'n.md']);
+  git(dir, ['commit', '-q', '-m', 'n']);
+  const gone = path.join(tmp('guard-gone-'), 'missing.git');
+  for (const input of [pushLine(dir, 'main'), pushLine(dir, 'main', 'f'.repeat(40))]) {
+    const r = check(dir, ['push', gone], { input });
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /could not list the remote/);
+    // no remote named at all also fails closed
+    assert.equal(check(dir, ['push'], { input }).status, 1);
+  }
+  // a known remote tip needs no listing
+  assert.equal(check(dir, ['push', gone], { input: pushLine(dir, 'main', rev(dir, 'main~1')) }).status, 0);
+});
+
+test('F1: a new-branch push skips commits the remote has on any branch or tag', () => {
+  const dir = mkRepoWithOrigin();
+  // pushed with the hooks off: a commit on the remote that the checks must not rescan
+  git(dir, ['checkout', '-q', '-b', 'side']);
+  fs.writeFileSync(path.join(dir, 'old.md'), 'Acme Corp\n');
+  git(dir, ['add', 'old.md']);
+  git(dir, ['commit', '-q', '-m', 'old']);
+  git(dir, ['tag', 'v0']);
+  git(dir, ['push', '-q', 'origin', 'v0']);
+  // no local origin/* ref points at it: only the live listing knows it is there
+  git(dir, ['checkout', '-q', '-b', 'feature']);
+  fs.writeFileSync(path.join(dir, 'new.md'), 'clean\n');
+  git(dir, ['add', 'new.md']);
+  git(dir, ['commit', '-q', '-m', 'new']);
+  const r = check(dir, ['push', 'origin'], { input: pushLine(dir, 'feature') });
+  assert.equal(r.status, 0, r.out);
 });
 
 test('missing gitleaks binary blocks (fail closed)', () => {
@@ -294,7 +359,7 @@ test('push: unknown remote sha still runs gitleaks on the fallback range', () =>
     `aws_access_key_id = ${FAKE_KEY}\naws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n`);
   git(dir, ['add', 'k.env']);
   git(dir, ['commit', '-q', '-m', 'keys']);
-  const r = check(dir, ['push'], { input: pushLine(dir, 'main', 'f'.repeat(40)) });
+  const r = check(dir, ['push', 'origin'], { input: pushLine(dir, 'main', 'f'.repeat(40)) });
   assert.equal(r.status, 1);
   assert.doesNotMatch(r.out, new RegExp(FAKE_KEY));
 });
@@ -317,7 +382,7 @@ test('staged and push: a -diff gitattribute does not hide content', () => {
   assert.equal(check(dir, ['staged']).status, 1);
   git(dir, ['add', '.gitattributes']);
   git(dir, ['commit', '-q', '-m', 'h']);
-  const r = check(dir, ['push'], { input: pushLine(dir, 'main', base) });
+  const r = check(dir, ['push', 'origin'], { input: pushLine(dir, 'main', base) });
   assert.equal(r.status, 1);
   assert.match(r.out, /blocked-term #1 at h\.md:1/);
 });
@@ -330,7 +395,7 @@ test('user git color config does not hide content', () => {
   git(dir, ['add', 'c.md']);
   assert.equal(check(dir, ['staged']).status, 1);
   git(dir, ['commit', '-q', '-m', 'c']);
-  const r = check(dir, ['push'], { input: pushLine(dir, 'main') });
+  const r = check(dir, ['push', bareRemote()], { input: pushLine(dir, 'main') });
   assert.equal(r.status, 1);
   assert.match(r.out, /blocked-term #1 at c\.md:1/);
 });
@@ -341,7 +406,7 @@ test('log.showRoot=false does not hide the root commit', () => {
   fs.writeFileSync(path.join(dir, 'r.md'), 'Acme Corp\n');
   git(dir, ['add', 'r.md']);
   git(dir, ['commit', '-q', '-m', 'root']);
-  const r = check(dir, ['push'], { input: pushLine(dir, 'main') });
+  const r = check(dir, ['push', bareRemote()], { input: pushLine(dir, 'main') });
   assert.equal(r.status, 1);
   assert.match(r.out, /blocked-term #1 at r\.md:1/);
 });
@@ -359,7 +424,7 @@ test('push: annotated tag message and commit author are scanned', () => {
   const dir = mkRepoWithOrigin();
   git(dir, ['tag', '-a', 'v1', '-m', 'release for Acme Corp']);
   const tagSha = git(dir, ['rev-parse', 'v1']).stdout.trim();
-  let r = check(dir, ['push'], { input: `refs/tags/v1 ${tagSha} refs/tags/v1 ${Z}\n` });
+  let r = check(dir, ['push', 'origin'], { input: `refs/tags/v1 ${tagSha} refs/tags/v1 ${Z}\n` });
   assert.equal(r.status, 1);
   assert.match(r.out, /blocked-term #1 at tag/);
   assert.doesNotMatch(r.out, /acme/i);
@@ -369,7 +434,7 @@ test('push: annotated tag message and commit author are scanned', () => {
   fs.writeFileSync(path.join(dir2, 'z.md'), 'fine\n');
   git(dir2, ['add', 'z.md']);
   git(dir2, ['commit', '-q', '-m', 'z', '--author', 'Acme Corp <x@example.invalid>']);
-  r = check(dir2, ['push'], { input: pushLine(dir2, 'main', base) });
+  r = check(dir2, ['push', 'origin'], { input: pushLine(dir2, 'main', base) });
   assert.equal(r.status, 1);
   assert.match(r.out, /blocked-term #1 at commit [0-9a-f]+ author/);
 });
@@ -383,7 +448,7 @@ function aiPush(ai, { claudecode = true, content = 'clean words\n', terms } = {}
   git(dir, ['commit', '-q', '-m', 'add b']);
   const env = { GUARD_AI_CMD: fake(ai) };
   if (claudecode) env.CLAUDECODE = '1';
-  return check(dir, ['push'], { input: pushLine(dir, 'main', base), env, ...(terms ? { terms } : {}) });
+  return check(dir, ['push', 'origin'], { input: pushLine(dir, 'main', base), env, ...(terms ? { terms } : {}) });
 }
 
 test('R18a: with CLAUDECODE, a passing AI review lets the push through', () => {
@@ -514,7 +579,7 @@ function bigPush(files, reviewer, extraEnv = {}) {
     git(dir, ['add', `f${n}.md`]);
     git(dir, ['commit', '-q', '-m', `commit ${n}`]);
   });
-  return check(dir, ['push'], { input: pushLine(dir, 'main', base), env: { CLAUDECODE: '1', GUARD_AI_CMD: reviewer.cmd, ...extraEnv } });
+  return check(dir, ['push', 'origin'], { input: pushLine(dir, 'main', base), env: { CLAUDECODE: '1', GUARD_AI_CMD: reviewer.cmd, ...extraEnv } });
 }
 
 test('R22: a push over 200 KB is reviewed in several batches and passes', () => {

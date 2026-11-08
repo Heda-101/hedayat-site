@@ -48,17 +48,49 @@ export function parseAddedLines(unifiedDiff) {
   return out;
 }
 
-export function parsePushRefs(stdin) {
+// remote is the pre-push hook's first argument (a remote name or URL); each ref carries it.
+export function parsePushRefs(stdin, remote) {
   return stdin.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
     const [localRef, localSha, remoteRef, remoteSha] = l.split(/\s+/);
-    return { localRef, localSha, remoteRef, remoteSha };
+    return remote === undefined ? { localRef, localSha, remoteRef, remoteSha }
+      : { localRef, localSha, remoteRef, remoteSha, remote };
   });
 }
 
+// 'new' (no remote tip) is resolved against the remote's live tips by effectiveRevs.
 export function pushRange(ref) {
   if (ZERO.test(ref.localSha)) return { kind: 'delete' };
-  if (ZERO.test(ref.remoteSha)) return { kind: 'range', revs: [ref.localSha, '--not', '--remotes'] };
+  if (ZERO.test(ref.remoteSha)) return { kind: 'new' };
   return { kind: 'range', revs: [`${ref.remoteSha}..${ref.localSha}`] };
+}
+
+const LS_REMOTE_TIMEOUT_MS = 120_000;
+const NO_LIST = "could not list the remote's branches and tags (git ls-remote failed); pushes need network access. Blocking";
+
+// Branch and tag tips the remote has right now (git ls-remote) that exist here as commits.
+// Local remote-tracking refs are never trusted: they go stale when a branch is deleted on the
+// server. Throws GuardError (safe to print) when the remote cannot be listed.
+export function liveRemoteTips(remote, cwd) {
+  if (typeof remote !== 'string' || remote === '' || remote.startsWith('-')) throw new GuardError('REMOTE_UNLISTED', NO_LIST);
+  let out;
+  try {
+    out = execFileSync('git', ['ls-remote', remote], {
+      cwd, encoding: 'utf8', maxBuffer: MAX, timeout: LS_REMOTE_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch {
+    throw new GuardError('REMOTE_UNLISTED', NO_LIST);
+  }
+  const shas = new Set();
+  for (const line of out.split('\n')) {
+    const m = /^([0-9a-f]{40,64})\trefs\/(heads|tags)\/\S+$/.exec(line);
+    if (m) shas.add(m[1]);
+  }
+  if (shas.size === 0) return [];
+  // one batch lookup; objects missing here are skipped, annotated tags count via their ^{} line
+  const types = execFileSync('git', ['cat-file', '--batch-check=%(objectname) %(objecttype)'], {
+    cwd, encoding: 'utf8', maxBuffer: MAX, input: `${[...shas].join('\n')}\n`, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  return types.split('\n').map((l) => l.split(' ')).filter(([sha, type]) => type === 'commit' && shas.has(sha)).map(([sha]) => sha);
 }
 
 function pathItems(nulList) {
@@ -79,15 +111,19 @@ function isCommit(sha, cwd) {
   try { git(['cat-file', '-e', `${sha}^{commit}`], cwd); return true; } catch { return false; }
 }
 
-// Revs to scan for a push ref; shared by gitleaks and the term scan so both see the same commits.
-// If the remote tip is unknown locally, fall back to commits on no remote.
+const liveTips = new WeakMap(); // ref -> tips, so one push lists its remote once
+
+// Revs to scan for a push ref; shared by gitleaks, the term scan, the image hold and the AI
+// review so all see the same commits. A known remote tip (from git's own pre-push input) gives
+// remoteSha..localSha. A new branch, or a remote tip unknown here, gives every commit not
+// reachable from the remote's live branch and tag tips (all of localSha when it has none here).
 export function effectiveRevs(ref, cwd = process.cwd()) {
   const range = pushRange(ref);
   if (range.kind === 'delete') return range;
-  if (range.revs.length === 1 && !isCommit(ref.remoteSha, cwd)) {
-    return { kind: 'range', revs: [ref.localSha, '--not', '--remotes'] };
-  }
-  return range;
+  if (range.kind === 'range' && isCommit(ref.remoteSha, cwd)) return range;
+  if (!liveTips.has(ref)) liveTips.set(ref, liveRemoteTips(ref.remote, cwd));
+  const tips = liveTips.get(ref);
+  return { kind: 'range', revs: tips.length ? [ref.localSha, '--not', ...tips] : [ref.localSha] };
 }
 
 export function collectRange(revs, cwd) {

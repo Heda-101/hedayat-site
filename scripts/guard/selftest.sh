@@ -123,6 +123,18 @@ git -C "$R" add p.md
 git -C "$R" -c core.hooksPath=/dev/null commit -q -m 'add p'
 out="$(run_env git -C "$R" push -q origin push-term 2>&1)"; expect "layer 1" "blocked term already committed is caught at push" 1 $? "$out"
 
+# F1: a branch deleted on the server leaves a stale origin/<branch> here; pushing the same
+# commit as a new branch must still be scanned (against the live remote, not local refs).
+printf 'Unrelated Selftest Words\n' >"$WORK/other-terms.txt"
+git -C "$R" checkout -q -b stale-src main
+printf 'met %s\n' "$TERM_TEXT" >"$R/s.md"
+git -C "$R" add s.md
+TERMS="$WORK/other-terms.txt" run_env git -C "$R" commit -q -m 'add s' >/dev/null 2>&1
+TERMS="$WORK/other-terms.txt" run_env git -C "$R" push -q origin stale-src >/dev/null 2>&1
+git -C "$WORK/l1-origin.git" branch -q -D stale-src
+git -C "$R" checkout -q -b stale-dst stale-src
+out="$(run_env git -C "$R" push -q origin stale-dst 2>&1)"; expect "layer 1" "stale tracking ref does not hide a new-branch push" 1 $? "$out"
+
 # ------------------------------------------------------------------ layer 2
 mkrepo l2 || { echo "FAIL setup: could not build the temp repo"; exit 1; }
 R="$WORK/l2"

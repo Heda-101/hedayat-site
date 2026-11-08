@@ -7,6 +7,7 @@ The personal website of Hedayat Tabesh: a scroll-driven home page that walks thr
 - Node 22, installed with nvm (`nvm install 22`).
 - gitleaks 8.19 or newer (`brew install gitleaks`).
 - For agent pushes: the `claude` CLI on your PATH and signed in.
+- Network access for pushes: each push checks the remote live with `git ls-remote` and is blocked if the remote can't be reached.
 - A blocked-terms file at `~/.config/hedayat-site/blocked-terms.txt`. Without it, every commit and push is blocked. One term per line. Lines starting with `#` are comments. A plain line matches anywhere, ignoring case, spaces and punctuation, so write multi-word names as plain lines. A line starting with `word:` matches only as a whole word.
 - CI needs the blocked terms in an Actions secret named `BLOCKED_TERMS`, in the same format.
 

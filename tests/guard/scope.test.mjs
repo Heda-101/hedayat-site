@@ -47,10 +47,13 @@ test('parsePushRefs reads hook stdin lines', () => {
     { localRef: 'refs/heads/y', localSha: a, remoteRef: 'refs/heads/y', remoteSha: Z },
   ]);
   assert.deepEqual(parsePushRefs(''), []);
+  assert.deepEqual(parsePushRefs(`refs/heads/x ${a} refs/heads/x ${b}\n`, 'origin'),
+    [{ localRef: 'refs/heads/x', localSha: a, remoteRef: 'refs/heads/x', remoteSha: b, remote: 'origin' }]);
 });
 
 test('pushRange: new branch, deletion, update', () => {
-  assert.deepEqual(pushRange({ localSha: 'a'.repeat(40), remoteSha: Z }).revs, ['a'.repeat(40), '--not', '--remotes']);
+  // a new branch is resolved against the remote's live tips (effectiveRevs), never local --remotes
+  assert.deepEqual(pushRange({ localSha: 'a'.repeat(40), remoteSha: Z }), { kind: 'new' });
   assert.equal(pushRange({ localSha: Z, remoteSha: 'b'.repeat(40) }).kind, 'delete');
   assert.deepEqual(pushRange({ localSha: 'a'.repeat(40), remoteSha: 'b'.repeat(40) }),
     { kind: 'range', revs: ['b'.repeat(40) + '..' + 'a'.repeat(40)] });

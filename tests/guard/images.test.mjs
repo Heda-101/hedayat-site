@@ -107,10 +107,13 @@ test('newImagesInPush: a deleted image, a deletion push and a clean push add non
   assert.deepEqual(newImagesInPush([{ localRef: '(delete)', localSha: Z, remoteRef: 'refs/heads/x', remoteSha: base }], dir), []);
 });
 
-test('newImagesInPush: unknown remote sha falls back to commits on no remote', () => {
+test('newImagesInPush: unknown remote sha falls back to commits not on the live remote', () => {
   const dir = mkRepo();
+  const origin = tmp('img-origin-');
+  git(origin, ['init', '-q', '--bare', '-b', 'main']);
+  git(dir, ['push', '-q', origin, 'main']);
   commitFiles(dir, { 'x.png': 'p' });
-  const found = newImagesInPush([refFor(dir, 'f'.repeat(40))], dir);
+  const found = newImagesInPush([{ ...refFor(dir, 'f'.repeat(40)), remote: origin }], dir);
   assert.deepEqual(found, ['x.png']);
 });
 

@@ -666,11 +666,10 @@ async function pushFlow(cwd, branch) {
   const mask = (s) => (findTerms(s, terms).length ? '[withheld]' : s);
 
   const localSha = git(['rev-parse', '--verify', 'HEAD^{commit}'], cwd).trim();
-  let remoteSha = Z;
-  try { remoteSha = git(['rev-parse', '--verify', '-q', `refs/remotes/origin/${branch}^{commit}`], cwd).trim() || Z; }
-  catch { remoteSha = Z; }
+  // No remote sha here: a local origin/<branch> can be stale (deleted on the server), so the
+  // checks cover every commit not on origin's live branch and tag tips (git ls-remote).
   const ref = `refs/heads/${branch}`;
-  const refs = [{ localRef: ref, localSha, remoteRef: ref, remoteSha }];
+  const refs = [{ localRef: ref, localSha, remoteRef: ref, remoteSha: Z, remote: 'origin' }];
 
   // Make sure git would push exactly this branch to origin/<branch>.
   const cfg = (key) => { try { return git(['config', '--get', key], cwd).trim(); } catch { return ''; } };

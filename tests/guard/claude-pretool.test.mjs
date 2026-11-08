@@ -318,6 +318,27 @@ test('hook scans only commits after the remote tracking tip', () => {
   assert.equal(r.status, 0, r.out);
 });
 
+test('F1: hook checks against the live origin, not a stale tracking ref', () => {
+  const dir = repo();
+  commitFile(dir, 'b.md', 'Acme Corp\n');
+  gitIn(dir, ['push', '-q', '-u', 'origin', 'feat/x']);
+  const origin = gitIn(dir, ['remote', 'get-url', 'origin']).trim();
+  gitIn(origin, ['branch', '-q', '-D', 'feat/x']); // gone on the server; origin/feat/x stays here
+  const r = hook(bash('git push', dir));
+  assert.equal(r.status, 2, r.out);
+  assert.match(r.out, /blocked-term #1 at b\.md:1/);
+  assert.doesNotMatch(r.out, /acme/i);
+});
+
+test('F1: hook blocks a push when origin cannot be listed', () => {
+  const dir = repo();
+  commitFile(dir, 'b.md', 'clean words\n');
+  gitIn(dir, ['remote', 'set-url', 'origin', path.join(tmp('guard-gone-'), 'missing.git')]);
+  const r = hook(bash('git push -u origin feat/x', dir));
+  assert.equal(r.status, 2, r.out);
+  assert.match(r.out, /could not list the remote/);
+});
+
 test('hook denies a push on a detached HEAD', () => {
   const dir = repo();
   gitIn(dir, ['checkout', '-q', '--detach']);
