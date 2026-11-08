@@ -4,7 +4,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { loadTerms, findTerms, GuardError, clean } from './terms.mjs';
-import { heldFilesInPush, confirmImages, isImagePath } from './images.mjs';
+import { heldFilesInPush, confirmImages, isImagePath, isAttributesPath } from './images.mjs';
 import { collectStaged, collectPush, collectRange, parsePushRefs, effectiveRevs, reviewBatchesForPush } from './scope.mjs';
 import { reviewDiff, REVIEW_TIMEOUT_MS } from './ai-review.mjs';
 
@@ -111,7 +111,7 @@ export function runPushChecks(refs, opts = {}) {
     images = heldFilesInPush(refs, cwd);
     if (images.length > 0) {
       for (const p of images) {
-        const kind = isImagePath(p) ? 'image' : 'binary file';
+        const kind = isImagePath(p) ? 'image' : isAttributesPath(p) ? 'attributes file' : 'binary file';
         lines.push(`${kind} needs confirmation: ${safeWhere(`path ${p}`, terms).replace(/^path /, '')}`);
       }
       if (!opts.tty || !confirmImages(images, opts.tty)) return { ok: false, lines, images };

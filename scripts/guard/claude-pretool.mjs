@@ -690,7 +690,7 @@ async function pushFlow(cwd, branch) {
     const checks = runPushChecks(refs, { cwd, terms }); // no tty: any new image or binary blocks
     if (!checks.ok) {
       const lines = checks.lines.map((l) => `guard: ${l.replace(/^guard: /, '')}`);
-      if (checks.images.length) lines.push('guard: Hedayat must push image and binary file changes himself');
+      if (checks.images.length) lines.push('guard: Hedayat must push image and binary file changes himself (and .gitattributes changes)');
       block(lines);
     }
   }

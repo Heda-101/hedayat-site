@@ -67,6 +67,16 @@ export function pushRange(ref) {
 const LS_REMOTE_TIMEOUT_MS = 120_000;
 const NO_LIST = "could not list the remote's branches and tags (git ls-remote failed); pushes need network access. Blocking";
 
+// The ssh command git would use (GIT_SSH_COMMAND, else core.sshCommand, else GIT_SSH, else
+// ssh) with -oBatchMode=yes appended. Setting GIT_SSH_COMMAND overrides the others, so they
+// are carried over rather than lost.
+function batchSshCommand(cwd) {
+  let cmd = process.env.GIT_SSH_COMMAND || '';
+  if (!cmd) { try { cmd = git(['config', '--get', 'core.sshCommand'], cwd).trim(); } catch { cmd = ''; } }
+  if (!cmd && process.env.GIT_SSH) cmd = `'${process.env.GIT_SSH.replace(/'/g, "'\\''")}'`;
+  return `${cmd || 'ssh'} -oBatchMode=yes`;
+}
+
 // Branch and tag tips the remote has right now (git ls-remote) that exist here as commits.
 // Local remote-tracking refs are never trusted: they go stale when a branch is deleted on the
 // server. Throws GuardError (safe to print) when the remote cannot be listed.
@@ -74,10 +84,11 @@ export function liveRemoteTips(remote, cwd) {
   if (typeof remote !== 'string' || remote === '' || remote.startsWith('-')) throw new GuardError('REMOTE_UNLISTED', NO_LIST);
   let out;
   try {
-    // never prompt for credentials: fail fast (and closed) instead of waiting on a hidden prompt
+    // never prompt for credentials, a passphrase or a host key: fail fast (and closed) instead
+    // of waiting on a hidden prompt
     out = execFileSync('git', ['ls-remote', remote], {
       cwd, encoding: 'utf8', maxBuffer: MAX, timeout: LS_REMOTE_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' },
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_SSH_COMMAND: batchSshCommand(cwd) },
     });
   } catch {
     throw new GuardError('REMOTE_UNLISTED', NO_LIST);
@@ -184,28 +195,35 @@ export const LOCKFILE_NAMES = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock
   'Gemfile.lock', 'poetry.lock', 'composer.lock'];
 export const LOCKFILE_PATHSPECS = LOCKFILE_NAMES.map((n) => `:(top,exclude,glob)**/${n}`);
 const PATHSPEC = ['--', ':(top)', ...LOCKFILE_PATHSPECS];
-// No --text here (F2): binaries show as "Binary files ... differ" and are listed in binaryPaths,
-// so an image does not fill the AI cap. collectRange (gitleaks and the term scan) keeps --text.
-const BASE_DIFF_OPTS = ['--root', '-m', '-r', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames'];
+// The AI diff is always --text, so .gitattributes (in-tree or .git/info/attributes) cannot
+// hide text as "binary". Files that are binary by CONTENT are left out of the patch by pathspec
+// and listed in binaryPaths instead (F2), so an image does not fill the AI cap and compressed or
+// UTF-16 bytes never pass as text. Deletions omit their old content (--irreversible-delete).
+const DIFF_OPTS = ['--root', '-m', '-r', '--text', '--irreversible-delete', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames'];
 const SPLIT = 'split this push into smaller pushes';
-const FIRST_FEW_BYTES = 8000; // git's own binary test: a NUL byte in the first 8000 bytes
+const FIRST_FEW_BYTES = 8000; // the same window git uses for its own NUL test
 
 const tooLarge = (what) => new GuardError('AI_TOO_LARGE', `${what} is over the ${MAX_BATCH_BYTES}-byte AI review cap; ${SPLIT}`);
 const bytes = (s) => Buffer.byteLength(s);
 
-function binaryPathsOf(sha, opts, cwd) {
-  const out = [];
-  const numstat = git(['diff-tree', '--numstat', '--no-commit-id', '-z', ...opts, sha, ...PATHSPEC], cwd);
-  for (const entry of numstat.split('\0')) {
-    const m = /^\n*(-|\d+)\t(-|\d+)\t([\s\S]*)$/.exec(entry);
-    if (m && m[1] === '-' && m[2] === '-' && !out.includes(m[3])) out.push(m[3]);
+// Binary by content alone, never by attributes: a NUL byte or invalid UTF-8 in the first 8000
+// bytes, or a UTF-16 byte-order mark (UTF-16 text need not contain a NUL; UTF-32 always does).
+export function isBinaryContent(buf) {
+  const head = buf.subarray(0, FIRST_FEW_BYTES);
+  if (head.includes(0)) return true;
+  if (head.length >= 2 && ((head[0] === 0xff && head[1] === 0xfe) || (head[0] === 0xfe && head[1] === 0xff))) return true;
+  try {
+    // a multi-byte character cut by the 8000-byte window is not an error
+    new TextDecoder('utf-8', { fatal: true }).decode(head, { stream: buf.length > FIRST_FEW_BYTES });
+  } catch {
+    return true;
   }
-  return out;
+  return false;
 }
 
-// True when git would call the file binary on content alone (no .gitattributes); null when the
-// path is gone from the commit (a deletion: there is no new content to show or list).
-function contentIsBinary(sha, p, cwd) {
+// isBinaryContent of path p in commit sha; null when p is not a file there (deleted, or a
+// submodule). Other git failures throw.
+export function contentIsBinary(sha, p, cwd) {
   let blob;
   try {
     blob = execFileSync('git', ['cat-file', 'blob', `${sha}:${p}`], { cwd, maxBuffer: MAX, stdio: ['ignore', 'pipe', 'ignore'] });
@@ -213,32 +231,46 @@ function contentIsBinary(sha, p, cwd) {
     if (typeof e.status === 'number') return null;
     throw e;
   }
-  return blob.subarray(0, FIRST_FEW_BYTES).includes(0);
+  return isBinaryContent(blob);
 }
 
-// Diff options for one commit. A text file that .gitattributes marks binary (-diff, binary)
-// must not hide from the AI, so any such file puts the whole commit back on --text.
-function diffOptsFor(sha, cwd) {
-  const kinds = binaryPathsOf(sha, BASE_DIFF_OPTS, cwd).map((p) => [p, contentIsBinary(sha, p, cwd)]);
-  const opts = kinds.some(([, bin]) => bin === false) ? [...BASE_DIFF_OPTS, '--text'] : BASE_DIFF_OPTS;
-  return { opts, binaryPaths: kinds.filter(([, bin]) => bin === true).map(([p]) => p) };
+// Paths one commit adds, modifies or type-changes (against each parent; renames show under the
+// new name), and those of them that are binary by content in this commit or, for a change, in
+// a parent. pathspec narrows the listing (the AI review leaves lockfiles out).
+export function changedPaths(sha, cwd, pathspec = ['--', ':(top)']) {
+  const out = git(['diff-tree', '--root', '-m', '-r', '--no-renames', '--name-status', '-z', '--no-commit-id', sha, ...pathspec], cwd);
+  const tok = out.split('\0');
+  const changed = [];
+  for (let i = 0; i < tok.length;) {
+    const status = tok[i].trim();
+    if (!status) { i++; continue; }
+    if (tok[i + 1] === undefined) throw new Error('malformed name-status output');
+    if (/^[AMT]/.test(status) && !changed.includes(tok[i + 1])) changed.push(tok[i + 1]);
+    i += 2;
+  }
+  const parents = git(['rev-list', '--parents', '-n', '1', sha], cwd).trim().split(' ').slice(1);
+  const binary = changed.filter((p) => contentIsBinary(sha, p, cwd) === true
+    || parents.some((par) => contentIsBinary(par, p, cwd) === true));
+  return { changed, binary };
 }
 
 // One commit as review units: the whole commit, or (when over the cap) its header plus one file each.
 function commitUnits(sha, cwd) {
   const short = sha.slice(0, 7);
-  const { opts: diffOpts, binaryPaths } = diffOptsFor(sha, cwd);
-  const whole = git(['diff-tree', '--always', '-p', '--pretty=fuller', ...diffOpts, sha, ...PATHSPEC], cwd);
+  const { binary: binaryPaths } = changedPaths(sha, cwd, PATHSPEC);
+  const spec = [...PATHSPEC, ...binaryPaths.map((p) => `:(top,exclude,literal)${p}`)];
+  const whole = git(['diff-tree', '--always', '-p', '--pretty=fuller', ...DIFF_OPTS, sha, ...spec], cwd);
   if (bytes(whole) <= MAX_BATCH_BYTES) return [{ diff: whole, binaryPaths }];
   const header = git(['show', '-s', '--pretty=fuller', sha], cwd);
-  const names = [...new Set(git(['diff-tree', '--name-only', '--no-commit-id', '-z', ...diffOpts, sha, ...PATHSPEC], cwd)
+  const names = [...new Set(git(['diff-tree', '--name-only', '--no-commit-id', '-z', ...DIFF_OPTS, sha, ...spec], cwd)
     .split('\0').filter(Boolean))];
   const units = [];
   names.forEach((name, i) => {
     const diff = `${header}\n(part ${i + 1} of ${names.length})\n`
-      + git(['diff-tree', '-p', '--no-commit-id', ...diffOpts, sha, '--', `:(top,literal)${name}`], cwd);
+      + git(['diff-tree', '-p', '--no-commit-id', ...DIFF_OPTS, sha, '--', `:(top,literal)${name}`], cwd);
     if (bytes(diff) > MAX_BATCH_BYTES) throw tooLarge(`one file in commit ${short}`);
-    units.push({ diff, binaryPaths: binaryPaths.includes(name) ? [name] : [] });
+    // the commit's binary paths travel with its first part
+    units.push({ diff, binaryPaths: i === 0 ? binaryPaths : [] });
   });
   if (units.length === 0) throw tooLarge(`commit ${short}`);
   return units;

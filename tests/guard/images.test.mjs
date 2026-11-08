@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -176,6 +177,60 @@ test('R23: check push holds a NUL-byte .txt and a UTF-16 file without a tty; y c
   assert.match(r.stdout, /binary file needs confirmation: u16\.txt/);
   assert.equal(runPush(dir, ref, { GUARD_TTY: tty('y\n') }).status, 0);
   assert.equal(runPush(dir, ref, { GUARD_TTY: tty('n\n') }).status, 1);
+});
+
+// Fix round 2: "binary" is decided from content, never from .gitattributes.
+const gz = (s) => zlib.gzipSync(Buffer.from(s));
+const utf16 = (s) => Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(s, 'utf16le')]);
+
+test('R23b: an in-tree "diff" attribute does not hide a gzip or a UTF-16 file', () => {
+  const dir = mkRepo();
+  const base = head(dir);
+  commitFiles(dir, { '.gitattributes': '*.dat diff\n*.txt diff\n', 'notes2.dat': gz('Zebra Quartz secret notes\n'), 'u2.txt': utf16('hello world\n') });
+  assert.deepEqual(heldFilesInPush([refFor(dir, base)], dir).sort(), ['.gitattributes', 'notes2.dat', 'u2.txt']);
+});
+
+test('R23b: .git/info/attributes does not hide a UTF-16 file', () => {
+  const dir = mkRepo();
+  const base = head(dir);
+  fs.mkdirSync(path.join(dir, '.git/info'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.git/info/attributes'), '*.txt diff\n*.dat diff\n');
+  commitFiles(dir, { 'u3.txt': utf16('hello world\n'), 'n.dat': gz('more notes\n') });
+  assert.deepEqual(heldFilesInPush([refFor(dir, base)], dir).sort(), ['n.dat', 'u3.txt']);
+});
+
+test('R23b: a UTF-16 file with no NUL byte (BOM check) and invalid UTF-8 are held', () => {
+  const dir = mkRepo();
+  const base = head(dir);
+  const cjk = utf16('漢字テスト');
+  assert.equal(cjk.includes(0), false);
+  commitFiles(dir, { 'cjk.txt': cjk, 'be.txt': Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from([0x6f, 0x22])]),
+    'raw.bin': Buffer.from([0xc3, 0x28, 0xa0, 0xa1, 0x41]), 'ok.md': 'café — fine\n' });
+  assert.deepEqual(heldFilesInPush([refFor(dir, base)], dir).sort(), ['be.txt', 'cjk.txt', 'raw.bin']);
+});
+
+test('R23b: changing .gitattributes needs confirmation; agents are held', () => {
+  const dir = mkRepo();
+  commitFiles(dir, { '.gitattributes': '*.md text\n' });
+  const base = head(dir);
+  commitFiles(dir, { '.gitattributes': '*.md text\n*.txt diff\n', 'sub/.gitattributes': '* -diff\n' });
+  const r = runPush(dir, refFor(dir, base), { GUARD_TTY: '/nonexistent' });
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /attributes file needs confirmation: \.gitattributes/);
+  assert.match(r.stdout, /attributes file needs confirmation: sub\/\.gitattributes/);
+  assert.equal(runPush(dir, refFor(dir, base), { GUARD_TTY: tty('y\n') }).status, 0);
+});
+
+test('R23b: an .md/.astro/.css-only agent push has no hold and passes', () => {
+  const dir = mkRepo();
+  const base = head(dir);
+  commitFiles(dir, { 'n1.md': '# hi\n', 'src/x/A.astro': '<h1>hi</h1>\n', 'src/x/a.css': 'a{color:red}\n' });
+  commitFiles(dir, { 'n1.md': '# hi\nmore\n' }, 'more');
+  const r = runPush(dir, refFor(dir, base), {
+    CLAUDECODE: '1', GUARD_AI_CMD: path.join(ROOT, 'tests/guard/fixtures/fake-claude-pass.sh'), GUARD_TTY: '/nonexistent' });
+  assert.equal(r.status, 0, r.out);
+  assert.doesNotMatch(r.out, /needs confirmation/);
+  assert.match(r.out, /AI review passed/);
 });
 
 test('R23: the prompt names images and binary files', () => {

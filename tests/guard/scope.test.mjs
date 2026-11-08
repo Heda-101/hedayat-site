@@ -61,6 +61,7 @@ test('pushRange: new branch, deletion, update', () => {
 
 // ---------- R22: AI review input batched by commit ----------
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -187,7 +188,6 @@ test('F2: a 250 KB image is listed as a binary path, not inlined into the AI dif
   assert.equal(b.length, 1);
   assert.ok(Buffer.byteLength(b[0].diff) < 5_000, `AI diff is ${Buffer.byteLength(b[0].diff)} bytes`);
   assert.deepEqual(b[0].binaryPaths, ['img/shot.png']);
-  assert.match(b[0].diff, /Binary files .*img\/shot\.png differ/);
   assert.match(b[0].diff, /\+caption text/);
 });
 
@@ -210,6 +210,34 @@ test('F2: a modified 250 KB image keeps the AI diff small', () => {
   assert.equal(b.length, 1);
   assert.ok(Buffer.byteLength(b[0].diff) < 5_000);
   assert.deepEqual(b[0].binaryPaths, ['pic.png']);
+});
+
+// Fix round 2: the AI diff decides "binary" from content, so an attribute cannot inline
+// compressed or UTF-16 bytes as text, nor hide text as binary.
+test('R23b: a "diff" attribute (in-tree or info/attributes) does not change what the AI gets', () => {
+  const dir = batchRepo();
+  const base = head(dir);
+  fs.mkdirSync(path.join(dir, '.git/info'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.git/info/attributes'), '*.txt diff\n');
+  const big = zlib.gzipSync(crypto.randomBytes(250_000));
+  commit(dir, { '.gitattributes': '*.dat diff\n', 'notes2.dat': big,
+    'u.txt': Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('hello world\n', 'utf16le')]), 'n.md': 'plain words\n' }, 'attrs');
+  const b = reviewBatchesForPush(refsFor(dir, base), dir);
+  assert.equal(b.length, 1);
+  assert.deepEqual([...b[0].binaryPaths].sort(), ['notes2.dat', 'u.txt']);
+  assert.ok(Buffer.byteLength(b[0].diff) < 5_000, `AI diff is ${Buffer.byteLength(b[0].diff)} bytes`);
+  assert.match(b[0].diff, /\+plain words/);
+  assert.match(b[0].diff, /\+\*\.dat diff/);
+});
+
+test('R23b: a commit over the cap that holds a binary is split without inlining it', () => {
+  const dir = batchRepo();
+  const base = head(dir);
+  commit(dir, { 'x.md': filler(120_000, 'x'), 'y.md': filler(120_000, 'y'), 'p.bin': crypto.randomBytes(250_000) }, 'mixed');
+  const b = reviewBatchesForPush(refsFor(dir, base), dir);
+  assert.equal(b.length, 2);
+  assert.deepEqual(b.flatMap((x) => x.binaryPaths), ['p.bin']);
+  assert.ok(b.every((x) => Buffer.byteLength(x.diff) <= 200_000));
 });
 
 test('F2 fix 4: a deleted binary is not listed in binaryPaths', () => {

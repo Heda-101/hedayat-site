@@ -286,6 +286,33 @@ test('F1 fix 2: ls-remote runs with prompts turned off', () => {
   assert.match(fs.readFileSync(log, 'utf8'), /^prompt=0 gcm=never$/m);
 });
 
+test('F1 fix round 2: ssh ls-remote runs in batch mode, keeping an existing ssh command', () => {
+  const dir = mkRepoWithOrigin();
+  const bin = tmp('guard-fakessh-');
+  const log = path.join(bin, 'log');
+  const fakeSsh = path.join(bin, 'fake-ssh');
+  fs.writeFileSync(fakeSsh, `#!/bin/sh\necho "$*" >>"${log}"\nexit 255\n`, { mode: 0o755 });
+  const line = pushLine(dir, 'main');
+  const cases = [
+    [{ GIT_SSH_COMMAND: `${fakeSsh} -i keyfile` }, `-i keyfile -oBatchMode=yes`],
+    [{ GIT_SSH: fakeSsh }, '-oBatchMode=yes'],
+  ];
+  for (const [env, want] of cases) {
+    fs.rmSync(log, { force: true });
+    const r = check(dir, ['push', 'origin', 'example.invalid:site.git'], { input: line, env });
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /could not list the remote/);
+    const got = fs.readFileSync(log, 'utf8');
+    assert.ok(got.split('\n').some((l) => l.startsWith(want)), got);
+  }
+  // core.sshCommand from config is kept too
+  git(dir, ['config', 'core.sshCommand', `${fakeSsh} -p 2222`]);
+  fs.rmSync(log, { force: true });
+  assert.equal(check(dir, ['push', 'origin', 'example.invalid:site.git'], { input: line }).status, 1);
+  const got = fs.readFileSync(log, 'utf8');
+  assert.ok(got.split('\n').some((l) => l.startsWith('-p 2222 -oBatchMode=yes')), got);
+});
+
 test('F1: a new branch or an unknown remote tip blocks when the remote cannot be listed', () => {
   const dir = mkRepoWithOrigin();
   fs.writeFileSync(path.join(dir, 'n.md'), 'clean\n');
