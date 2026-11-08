@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { loadTerms, findTerms, GuardError, clean } from './terms.mjs';
 import { heldFilesInPush, confirmImages, isImagePath, isAttributesPath } from './images.mjs';
-import { collectStaged, collectPush, collectRange, parsePushRefs, effectiveRevs, reviewBatchesForPush, gitEnv } from './scope.mjs';
+import { collectStaged, stagedAddedLines, collectPush, collectRange, parsePushRefs, effectiveRevs, reviewBatchesForPush, gitEnv } from './scope.mjs';
 import { reviewDiff, REVIEW_TIMEOUT_MS } from './ai-review.mjs';
 
 const HINT = 'create ~/.config/hedayat-site/blocked-terms.txt with at least one term';
@@ -63,12 +63,39 @@ function scan(items, terms) {
   return lines.length > 0;
 }
 
-// Returns masked output lines; an empty array means gitleaks passed.
-function gitleaksLines(args, terms, cwd) {
+// Config forced on the git that gitleaks runs. Colour codes split tokens, a tiny
+// bigFileThreshold or an attributes file marking text -diff makes text look binary, and any
+// of these blinds the scan.
+const GITLEAKS_FORCED_CONFIG = [['color.ui', 'never'], ['color.diff', 'never'], ['core.bigFileThreshold', '2g'],
+  ['core.attributesFile', '/dev/null']];
+// Options gitleaks passes on to its `git log -p` (via --log-opts): --text also overrides
+// in-tree .gitattributes and .git/info/attributes, which no config can switch off.
+export const GITLEAKS_LOG_OPTS = ['--text', '--no-color', '--no-ext-diff', '--no-textconv'];
+
+// The shared git environment (scope.mjs gitEnv) plus the forced config, appended after any
+// GIT_CONFIG_COUNT entries and after any `git -c` values (GIT_CONFIG_PARAMETERS), which take
+// precedence over GIT_CONFIG_COUNT, so the forced values win either way.
+export function gitleaksEnv() {
+  const env = gitEnv();
+  let n = /^\d+$/.test(env.GIT_CONFIG_COUNT || '') ? Number(env.GIT_CONFIG_COUNT) : 0;
+  for (const [k, v] of GITLEAKS_FORCED_CONFIG) {
+    env[`GIT_CONFIG_KEY_${n}`] = k;
+    env[`GIT_CONFIG_VALUE_${n}`] = v;
+    n++;
+  }
+  env.GIT_CONFIG_COUNT = String(n);
+  const params = GITLEAKS_FORCED_CONFIG.map(([k, v]) => `'${k}'='${v}'`).join(' ');
+  env.GIT_CONFIG_PARAMETERS = env.GIT_CONFIG_PARAMETERS ? `${env.GIT_CONFIG_PARAMETERS} ${params}` : params;
+  return env;
+}
+
+// Returns masked output lines; an empty array means gitleaks passed. input, when given, is fed
+// to gitleaks on stdin (the `stdin` command).
+function gitleaksLines(args, terms, cwd, input) {
   try {
-    // gitleaks runs git itself, so it gets the guard's git environment (scope.mjs gitEnv)
     execFileSync('gitleaks', [...args, '--redact', '--no-banner'], {
-      cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 256 * 1024 * 1024, env: gitEnv(),
+      cwd, encoding: 'utf8', input, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+      maxBuffer: 256 * 1024 * 1024, env: gitleaksEnv(),
     });
     return [];
   } catch (e) {
@@ -83,8 +110,16 @@ function gitleaksLines(args, terms, cwd) {
   }
 }
 
-function runGitleaks(args, terms) {
-  const lines = gitleaksLines(args, terms);
+// Pre-commit gitleaks. `gitleaks git --staged` runs a plain `git diff` that takes no extra
+// options, so .gitattributes or .git/info/attributes can still make text look binary to it.
+// A second pass feeds the staged added lines, taken with --text, to `gitleaks stdin`. Only
+// added lines go in, so removing a secret is not a finding.
+function runStagedGitleaks(terms) {
+  const lines = gitleaksLines(['git', '--staged', '--pre-commit'], terms);
+  if (lines.length === 0) {
+    const added = stagedAddedLines().map((a) => a.text).join('\n');
+    if (added) lines.push(...gitleaksLines(['stdin'], terms, undefined, `${added}\n`));
+  }
   toStderr(lines);
   return lines.length > 0;
 }
@@ -103,7 +138,7 @@ export function runPushChecks(refs, opts = {}) {
     for (const ref of refs) {
       const range = effectiveRevs(ref, cwd);
       if (range.kind === 'delete') continue;
-      lines.push(...gitleaksLines(['git', `--log-opts=${range.revs.join(' ')}`], terms, cwd));
+      lines.push(...gitleaksLines(['git', `--log-opts=${[...range.revs, ...GITLEAKS_LOG_OPTS].join(' ')}`], terms, cwd));
     }
     lines.push(...scanLines(collectPush(refs, cwd), terms));
     if (lines.length > 0) return { ok: false, lines, images };
@@ -175,7 +210,7 @@ async function main(argv) {
   let blocked = false;
   try {
     if (mode === 'staged') {
-      blocked = runGitleaks(['git', '--staged', '--pre-commit'], terms);
+      blocked = runStagedGitleaks(terms);
       blocked = scan(collectStaged(), terms) || blocked;
     } else if (mode === 'message') {
       if (!arg) fail('message mode needs the commit message file');

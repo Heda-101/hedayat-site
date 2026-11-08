@@ -128,10 +128,16 @@ function addedItems(diff) {
   return parseAddedLines(diff).map((a) => ({ where: `${a.path}:${a.line}`, text: a.text }));
 }
 
+// Lines added by the staged change, read with --text so attributes cannot hide them.
+export function stagedAddedLines(cwd = process.cwd()) {
+  return parseAddedLines(git(['diff', '--cached', '-U0', '-M', '--text', '--no-color', '--no-ext-diff', '--no-textconv',
+    '--src-prefix=a/', '--dst-prefix=b/'], cwd));
+}
+
 export function collectStaged(cwd = process.cwd()) {
-  const diff = git(['diff', '--cached', '-U0', '-M', '--text', '--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/'], cwd);
   const names = git(['diff', '--cached', '--name-only', '-M', '-z'], cwd);
-  return [...addedItems(diff), ...pathItems(names)];
+  const added = stagedAddedLines(cwd).map((a) => ({ where: `${a.path}:${a.line}`, text: a.text }));
+  return [...added, ...pathItems(names)];
 }
 
 function isCommit(sha, cwd) {

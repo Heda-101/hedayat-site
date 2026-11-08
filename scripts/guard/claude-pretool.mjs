@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { gitEnv } from './scope.mjs'; // the one environment for the guard's git calls
 
 const NESTED = 'nested shell around git is not allowed for agents';
 const PUSH_ONLY = 'agents push only the current branch; ask Hedayat for anything else';
@@ -649,7 +650,7 @@ function allow() { process.exit(0); }
 function currentBranch(cwd) {
   try {
     return execFileSync('git', ['symbolic-ref', '--short', '-q', 'HEAD'], {
-      cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: gitEnv(),
     }).trim() || null;
   } catch (e) {
     if (typeof e.status === 'number') return null; // detached HEAD or not a repository
@@ -709,7 +710,7 @@ const STATE_CHANGING = new Set(['commit', 'push', 'merge', 'rebase', 'cherry-pic
 // executable files (not symlinks), and scripts/guard/check.mjs exists. Any error = not intact.
 export function hooksIntact(cwd) {
   try {
-    const run = (args, dir) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const run = (args, dir) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: gitEnv() }).trim();
     const top = run(['rev-parse', '--show-toplevel'], cwd);
     if (run(['config', '--get', 'core.hooksPath'], top) !== '.githooks') return false;
     for (const h of ['pre-commit', 'commit-msg', 'pre-push']) {

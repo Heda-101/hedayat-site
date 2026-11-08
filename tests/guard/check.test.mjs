@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -731,4 +732,91 @@ test('M10: importing check.mjs from another file named check.mjs does not run it
   const r = spawnSync(process.execPath, [f], { encoding: 'utf8', env: baseEnv() });
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /imported/);
+});
+
+// ---- Fix round 4: git config and attributes must not blind gitleaks ----
+const ghToken = () => `ghp_${crypto.randomBytes(27).toString('base64').replace(/[^A-Za-z0-9]/g, 'A').slice(0, 36)}`;
+const attrsFile = () => { const f = path.join(tmp('guard-attrs-'), 'attrs'); fs.writeFileSync(f, '* -diff\n'); return f; };
+const colorGlobal = () => { const f = path.join(tmp('guard-gcfg-'), 'gitconfig'); fs.writeFileSync(f, '[color]\n\tui = always\n\tdiff = always\n'); return f; };
+// Each vector: env for the guard, and files to commit alongside the token.
+const BLINDERS = [
+  ['-c color.ui=always', () => ({ env: { GIT_CONFIG_PARAMETERS: "'color.ui'='always'" } })],
+  ['-c color.diff=always', () => ({ env: { GIT_CONFIG_PARAMETERS: "'color.diff'='always'" } })],
+  ['color from GIT_CONFIG_GLOBAL', () => ({ env: { GIT_CONFIG_GLOBAL: colorGlobal() } })],
+  ['GIT_CONFIG_COUNT color.ui=always', () => ({ env: { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'color.ui', GIT_CONFIG_VALUE_0: 'always' } })],
+  ['-c core.bigFileThreshold=1', () => ({ env: { GIT_CONFIG_PARAMETERS: "'core.bigfilethreshold'='1'" } })],
+  ['-c core.attributesFile=<* -diff>', () => ({ env: { GIT_CONFIG_PARAMETERS: `'core.attributesfile'='${attrsFile()}'` } })],
+  ['committed .gitattributes * -diff', () => ({ files: { '.gitattributes': '* -diff\n' } })],
+  ['committed .gitattributes * binary', () => ({ files: { '.gitattributes': '* binary\n' } })],
+  ['.git/info/attributes * -diff', () => ({ info: '* -diff\n' })],
+];
+
+function tokenRepo(files = {}, info) {
+  const dir = mkRepoWithOrigin();
+  const base = rev(dir, 'main');
+  if (info) { fs.mkdirSync(path.join(dir, '.git/info'), { recursive: true }); fs.writeFileSync(path.join(dir, '.git/info/attributes'), info); }
+  const token = ghToken();
+  for (const [n, c] of Object.entries({ ...files, 'app.js': `const token = "${token}";\n` })) {
+    fs.writeFileSync(path.join(dir, n), c);
+    git(dir, ['add', n]);
+  }
+  return { dir, base, token };
+}
+
+test('R4: each git config or attribute vector cannot blind gitleaks at push', () => {
+  const missed = [];
+  for (const [label, make] of BLINDERS) {
+    const v = make();
+    const { dir, base, token } = tokenRepo(v.files, v.info);
+    git(dir, ['commit', '-q', '-m', 'app']);
+    const r = check(dir, ['push', 'origin'], { input: pushLine(dir, 'main', base), env: v.env || {} });
+    if (r.status !== 1 || !/gitleaks blocked this/.test(r.out)) missed.push(label);
+    assert.ok(!r.out.includes(token), label);
+  }
+  assert.deepEqual(missed, []);
+});
+
+test('R4: each git config or attribute vector cannot blind gitleaks at commit (staged)', () => {
+  const missed = [];
+  for (const [label, make] of BLINDERS) {
+    const v = make();
+    const { dir, token } = tokenRepo(v.files, v.info);
+    const r = check(dir, ['staged'], { env: v.env || {} });
+    if (r.status !== 1 || !/gitleaks blocked this/.test(r.out)) missed.push(label);
+    assert.ok(!r.out.includes(token), label);
+  }
+  assert.deepEqual(missed, []);
+});
+
+test('R4: a clean push and commit still pass under every vector; removing a secret is not a finding', () => {
+  for (const [label, make] of BLINDERS.filter(([l]) => !/committed|info/.test(l))) {
+    const v = make();
+    const dir = mkRepoWithOrigin();
+    const base = rev(dir, 'main');
+    fs.writeFileSync(path.join(dir, 'ok.md'), 'clean words\n');
+    git(dir, ['add', 'ok.md']);
+    assert.equal(check(dir, ['staged'], { env: v.env }).status, 0, label);
+    git(dir, ['commit', '-q', '-m', 'ok']);
+    const r = check(dir, ['push', 'origin'], { input: pushLine(dir, 'main', base), env: v.env });
+    assert.equal(r.status, 0, `${label}: ${r.out}`);
+  }
+  // a commit that deletes a committed token is fine
+  const { dir } = tokenRepo();
+  git(dir, ['-c', 'core.hooksPath=/dev/null', 'commit', '-q', '-m', 'app']);
+  git(dir, ['rm', '-q', 'app.js']);
+  assert.equal(check(dir, ['staged']).status, 0);
+});
+
+test('R4: gitEnv sets GIT_NO_REPLACE_OBJECTS and drops pathspec modes', async () => {
+  const { gitEnv } = await import(pathToFileURL(path.join(ROOT, 'scripts/guard/scope.mjs')).href);
+  const saved = process.env.GIT_LITERAL_PATHSPECS;
+  process.env.GIT_LITERAL_PATHSPECS = '1';
+  try {
+    const e = gitEnv({ EXTRA_X: 'y' });
+    assert.equal(e.GIT_NO_REPLACE_OBJECTS, '1');
+    assert.equal(e.GIT_LITERAL_PATHSPECS, undefined);
+    assert.equal(e.EXTRA_X, 'y');
+  } finally {
+    if (saved === undefined) delete process.env.GIT_LITERAL_PATHSPECS; else process.env.GIT_LITERAL_PATHSPECS = saved;
+  }
 });
