@@ -20,14 +20,16 @@ function parseNameStatus(out) {
       i += 3;
     } else {
       if (tok[i + 1] === undefined) throw new Error('malformed name-status output');
-      if (status[0] === 'A') paths.push(tok[i + 1]);
+      // added, modified (a replaced picture leaks as easily as a new one) or type-changed
+      if (/^[AMT]/.test(status)) paths.push(tok[i + 1]);
       i += 2;
     }
   }
   return paths;
 }
 
-// Image files added (or renamed/copied to) anywhere in the pushed ranges. Throws on any git error.
+// Image files added, modified, type-changed or renamed/copied to anywhere in the pushed ranges.
+// Throws on any git error.
 export function newImagesInPush(refs, cwd = process.cwd()) {
   const found = new Set();
   for (const ref of refs) {

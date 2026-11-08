@@ -57,6 +57,24 @@ test('I4: edits to guard files ask for approval', () => {
   asks(run(p, input('Write', 'scripts/guard/rel.mjs', p)));
 });
 
+test('F3: the content rules and gitleaks config ask for approval too', () => {
+  const p = project();
+  for (const f of ['CONTENT-GUIDELINES.md', 'content-guidelines.md', '.gitleaks.toml', '.gitleaksignore']) {
+    for (const tool of ['Edit', 'Write', 'MultiEdit']) asks(run(p, input(tool, path.join(p, f), p)));
+  }
+  asks(run(p, input('Write', 'CONTENT-GUIDELINES.md', p)));
+  // only the root copies are guard files
+  for (const f of ['docs/CONTENT-GUIDELINES.md', 'src/.gitleaks.toml', 'CONTENT-GUIDELINES.md.bak']) passes(run(p, input('Edit', path.join(p, f), p)));
+});
+
+test('F3 settings: without Node 22, an edit to the content rules blocks', () => {
+  const p = project();
+  const env = { PATH: '/usr/bin:/bin', NVM_DIR: '/nonexistent', HOME: tmp('guard-home-') };
+  assert.equal(viaSettings(p, input('Edit', path.join(p, 'CONTENT-GUIDELINES.md'), p), env).status, 2);
+  assert.equal(viaSettings(p, input('Edit', path.join(p, '.gitleaks.toml'), p), env).status, 2);
+  asks(viaSettings(p, input('Edit', path.join(p, 'CONTENT-GUIDELINES.md'), p)));
+});
+
 test('I4: other paths pass silently', () => {
   const p = project();
   for (const f of ['src/page.astro', 'README.md', 'scripts/build.sh', '.claude/agents/x.md', '.github/ISSUE_TEMPLATE/a.md',

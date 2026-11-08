@@ -177,8 +177,10 @@ export function collectPush(refs, cwd = process.cwd()) {
 // scan and gitleaks still read them).
 export const MAX_BATCH_BYTES = 200_000;
 export const MAX_BATCHES = 10;
-export const LOCKFILE_PATHSPECS = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', '*.lock']
-  .map((g) => `:(top,exclude,glob)**/${g}`);
+// Exact basenames only: a glob like *.lock would also hide files such as secrets.lock.
+export const LOCKFILE_NAMES = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'Cargo.lock',
+  'Gemfile.lock', 'poetry.lock', 'composer.lock'];
+export const LOCKFILE_PATHSPECS = LOCKFILE_NAMES.map((n) => `:(top,exclude,glob)**/${n}`);
 const PATHSPEC = ['--', ':(top)', ...LOCKFILE_PATHSPECS];
 // No --text here (F2): binaries show as "Binary files ... differ" and are listed in binaryPaths,
 // so an image does not fill the AI cap. collectRange (gitleaks and the term scan) keeps --text.

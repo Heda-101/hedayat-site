@@ -586,7 +586,7 @@ export function ghTextItems(cmd) {
     const t = unwrap(p.toks).toks;
     if (!t.length || t[0].dyn || base(t[0].v).toLowerCase() !== 'gh') continue;
     if ((t[1] && t[1].dyn) || (t[2] && t[2].dyn)) return { error: 'gh commands with shell expansions in the command name are not allowed for agents' };
-    const subs = t[1] && GH_TEXT_SUBS[t[1].v];
+    const subs = t[1] && Object.hasOwn(GH_TEXT_SUBS, t[1].v) ? GH_TEXT_SUBS[t[1].v] : null;
     if (!subs || !t[2] || !subs.includes(t[2].v)) continue;
     found = true;
     for (let k = 3; k < t.length; k++) {

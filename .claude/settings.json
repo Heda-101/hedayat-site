@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'in=$(cat); ( source \"$CLAUDE_PROJECT_DIR\"/scripts/guard/node22.sh && printf \"%s\" \"$in\" | node \"$CLAUDE_PROJECT_DIR\"/scripts/guard/claude-edit-guard.mjs ); rc=$?; [ $rc -eq 0 ] && exit 0; [ $rc -eq 2 ] && exit 2; case \"$in\" in *[Gg][Ii][Tt]*|*[Gg][Uu][Aa][Rr][Dd]*|*[Ss][Ee][Tt][Uu][Pp]*|*[Ss][Ee][Tt][Tt][Ii][Nn][Gg][Ss]*) exit 2 ;; esac; exit 0'",
+            "command": "bash -c 'in=$(cat); ( source \"$CLAUDE_PROJECT_DIR\"/scripts/guard/node22.sh && printf \"%s\" \"$in\" | node \"$CLAUDE_PROJECT_DIR\"/scripts/guard/claude-edit-guard.mjs ); rc=$?; [ $rc -eq 0 ] && exit 0; [ $rc -eq 2 ] && exit 2; case \"$in\" in *[Gg][Ii][Tt]*|*[Gg][Uu][Aa][Rr][Dd]*|*[Ss][Ee][Tt][Uu][Pp]*|*[Ss][Ee][Tt][Tt][Ii][Nn][Gg][Ss]*|*[Gg][Uu][Ii][Dd][Ee][Ll][Ii][Nn][Ee][Ss]*) exit 2 ;; esac; exit 0'",
             "timeout": 30
           }
         ]

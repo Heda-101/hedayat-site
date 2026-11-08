@@ -1,15 +1,17 @@
 // Claude Code PreToolUse hook for Edit|Write|MultiEdit|NotebookEdit (layer 3, ruling R21).
 // An edit to the guard's own files (git hooks, guard scripts, setup, Claude settings, CI
-// workflows, .git) gets permissionDecision "ask", so a human approves each one. Every other
-// path exits 0 with no output. Paths are resolved (`..`, symlinks, case) before matching.
+// workflows, .git, CONTENT-GUIDELINES.md, the gitleaks config) gets permissionDecision "ask",
+// so a human approves each one. Every other path exits 0 with no output. Paths are resolved (`..`, symlinks, case) before matching.
 // Any error exits 2 when the input looks like it names a guard file, else 0.
 import fs from 'node:fs';
 import path from 'node:path';
 
 const GUARDED = [/^\.githooks(\/|$)/, /^scripts\/guard(\/|$)/, /^scripts\/setup\.sh$/, /^\.claude\/settings[^/]*\.json$/,
-  /^\.github\/workflows(\/|$)/, /^\.git(\/|$)/];
+  /^\.github\/workflows(\/|$)/, /^\.git(\/|$)/,
+  // the rules the AI review applies, and the secret scanner's config and allowlist
+  /^content-guidelines\.md$/, /^\.gitleaks\.toml$/, /^\.gitleaksignore$/];
 // Kept in step with the case pattern in the .claude/settings.json command.
-const LOOKS_GUARDED = /git|guard|setup|settings/i;
+const LOOKS_GUARDED = /git|guard|setup|settings|guidelines/i;
 const REASON = 'this file is part of the commit/push guard; Hedayat must approve changes to it';
 
 // Real path of p, even when p (or its last parts) does not exist yet.

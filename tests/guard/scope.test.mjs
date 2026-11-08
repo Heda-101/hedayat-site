@@ -150,12 +150,23 @@ test('R22: lockfiles are left out of the AI input only', () => {
   commit(dir, {
     'package-lock.json': filler(300_000, 'npm'), 'web/pnpm-lock.yaml': filler(1000, 'pnpm'),
     'yarn.lock': filler(1000, 'yarn'), 'Gemfile.lock': filler(1000, 'gem'), 'src/app.md': 'real change\n',
+    'bun.lockb': filler(1000, 'bun'), 'crate/Cargo.lock': filler(1000, 'cargo'), 'poetry.lock': filler(1000, 'poetry'),
+    'composer.lock': filler(1000, 'composer'),
   }, 'deps and app');
   const b = reviewBatchesForPush(refsFor(dir, base), dir);
   assert.equal(b.length, 1);
   assert.match(b[0].diff, /\+real change/);
   assert.match(b[0].diff, /deps and app/);
-  assert.doesNotMatch(b[0].diff, /npm filler|pnpm filler|yarn filler|gem filler/);
+  assert.doesNotMatch(b[0].diff, /npm filler|pnpm filler|yarn filler|gem filler|bun filler|cargo filler|poetry filler|composer filler/);
+});
+
+test('F3: only exact lockfile names are left out; other *.lock files reach the AI', () => {
+  const dir = batchRepo();
+  const base = head(dir);
+  commit(dir, { 'secrets.lock': 'kept one\n', 'conf/app.lock': 'kept two\n', 'my-yarn.lock': 'kept three\n' }, 'locks');
+  const b = reviewBatchesForPush(refsFor(dir, base), dir);
+  assert.equal(b.length, 1);
+  for (const t of ['kept one', 'kept two', 'kept three']) assert.match(b[0].diff, new RegExp(`\\+${t}`));
 });
 
 test('R22: binary paths are listed with the batch of their commit', () => {

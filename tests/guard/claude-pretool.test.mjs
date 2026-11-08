@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { classifyCommand } from '../../scripts/guard/claude-pretool.mjs';
+import { classifyCommand, ghTextItems } from '../../scripts/guard/claude-pretool.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const HOOK = path.join(ROOT, 'scripts/guard/claude-pretool.mjs');
@@ -597,6 +597,16 @@ test('I5: clean gh text and other gh commands pass', () => {
     'gh pr create --fill', 'echo high and right']) {
     const r = hook(bash(c, dir));
     assert.equal(r.status, 0, `${c}: ${r.out}`);
+  }
+});
+
+test('F3: gh subcommands named like Object members follow the normal rules', () => {
+  const dir = tmp('guard-gh-');
+  for (const c of ['gh constructor x', 'gh __proto__ create', 'gh toString x', 'gh hasOwnProperty x', 'gh pr constructor x']) {
+    const r = hook(bash(c, dir));
+    assert.equal(r.status, 0, `${c}: ${r.out}`);
+    assert.doesNotMatch(r.out, /internal error/, c);
+    assert.equal(ghTextItems(c), null, c);
   }
 });
 

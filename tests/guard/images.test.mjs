@@ -108,6 +108,22 @@ test('newImagesInPush: a deleted image, a deletion push and a clean push add non
   assert.deepEqual(newImagesInPush([{ localRef: '(delete)', localSha: Z, remoteRef: 'refs/heads/x', remoteSha: base }], dir), []);
 });
 
+test('F3: a modified or type-changed image is held too', () => {
+  const dir = mkRepo();
+  commitFiles(dir, { 'old.png': 'first', 'kind.png': 'regular' });
+  const base = head(dir);
+  commitFiles(dir, { 'old.png': 'replaced with a different picture' }, 'modify');
+  assert.deepEqual(newImagesInPush([refFor(dir, base)], dir), ['old.png']);
+  fs.rmSync(path.join(dir, 'kind.png'));
+  fs.symlinkSync('old.png', path.join(dir, 'kind.png'));
+  git(dir, ['add', 'kind.png']);
+  git(dir, ['commit', '-q', '-m', 'type change']);
+  assert.deepEqual(newImagesInPush([refFor(dir, base)], dir).sort(), ['kind.png', 'old.png']);
+  const r = runPush(dir, refFor(dir, base), { GUARD_TTY: '/nonexistent' });
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /image needs confirmation: old\.png/);
+});
+
 test('newImagesInPush: unknown remote sha falls back to commits not on the live remote', () => {
   const dir = mkRepo();
   const origin = tmp('img-origin-');
