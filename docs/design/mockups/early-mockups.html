@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Early Mockups · hedayattabesh.com</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,400..800&family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Early-stage mockups: three frames stacked for review (opening screen, one pinned chapter, Experience page). Not final design. */
+:root {
+  --bg: #08090b;
+  --panel: #111318;
+  --ink: #f2f0eb;
+  --muted: #8a8f99;
+  --line: #23262d;
+  --accent: #4d7cff;
+  --sample: #e0a64a;
+  --f-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --ease-out: cubic-bezier(.23, 1, .32, 1);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: #d9dbe0; color: #1a1d23; font: 15px/1.6 var(--f-body); }
+.review { max-width: 1180px; margin: 0 auto; padding: 40px 16px 80px; display: grid; gap: 48px; }
+.review > header h1 { font: 700 28px/1.2 var(--f-display); margin: 0 0 6px; }
+.review > header p { margin: 0; color: #4a505b; max-width: 70ch; }
+.frame-label { font: 500 12px var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: #4a505b; margin-bottom: 10px; display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.frame { background: var(--bg); color: var(--ink); border-radius: 12px; overflow: hidden; position: relative; box-shadow: 0 20px 50px -20px rgba(0,0,0,.45); }
+.note { font-size: 13px; color: #4a505b; margin-top: 10px; max-width: 80ch; }
+.note b { color: #1a1d23; }
+
+/* shared site chrome */
+.nav { display: flex; justify-content: space-between; align-items: center; padding: 18px 28px; font: 500 13px var(--f-mono); color: var(--muted); }
+.nav .brand { color: var(--ink); letter-spacing: .02em; }
+.nav .links { display: flex; gap: 22px; }
+.nav .links .on { color: var(--ink); }
+.nav .links .soon { opacity: .45; }
+.rail { position: absolute; right: 26px; top: 50%; transform: translateY(-50%); display: grid; gap: 14px; font: 500 11px var(--f-mono); color: var(--muted); text-align: right; }
+.rail span { display: flex; align-items: center; gap: 10px; justify-content: flex-end; }
+.rail span::after { content: ""; width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--muted); }
+.rail .done::after { background: var(--muted); }
+.rail .now { color: var(--ink); }
+.rail .now::after { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 4px rgba(77,124,255,.2); }
+
+/* frame 1: opening screen */
+.hero { min-height: 600px; display: grid; grid-template-rows: auto 1fr auto; }
+.hero-body { padding: 40px 28px 0 64px; align-self: center; max-width: 900px; }
+.hero .kicker { font: 500 13px var(--f-mono); color: var(--accent); letter-spacing: .06em; text-transform: uppercase; }
+.hero h2 { font: 800 clamp(48px, 8vw, 104px)/.92 var(--f-display); font-stretch: 78%; letter-spacing: -.02em; margin: 18px 0 22px; }
+.hero h2 .line { display: block; animation: rise 1.1s var(--ease-out) both; }
+.hero h2 .line:nth-child(2) { animation-delay: .12s; color: var(--muted); }
+.hero p.sub { font-size: 20px; color: var(--muted); max-width: 40ch; margin: 0; animation: rise 1.1s var(--ease-out) .24s both; }
+.hero p.sub b { color: var(--ink); font-weight: 500; }
+.phases { display: flex; gap: 0; padding: 0 28px 28px 64px; margin-top: 48px; font: 500 12px var(--f-mono); color: var(--muted); flex-wrap: wrap; }
+.phases span { padding: 8px 14px 8px 0; margin-right: 14px; border-top: 1px solid var(--line); min-width: 110px; }
+.phases span b { color: var(--ink); font-weight: 500; display: block; }
+.scrollcue { position: absolute; left: 64px; bottom: 96px; font: 500 12px var(--f-mono); color: var(--muted); display: none; }
+@keyframes rise { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: none; } }
+
+/* frame 2: Test chapter */
+.chapter { min-height: 640px; display: grid; grid-template-rows: auto 1fr; }
+.ch-body { padding: 24px 140px 48px 64px; display: grid; gap: 34px; align-content: center; }
+.ch-num { font: 500 13px var(--f-mono); color: var(--muted); }
+.ch-num em { color: var(--accent); font-style: normal; }
+.chapter h2 { font: 800 clamp(40px, 6vw, 76px)/.95 var(--f-display); font-stretch: 78%; margin: 6px 0 0; letter-spacing: -.02em; }
+.standard { font: 400 22px/1.4 var(--f-body); max-width: 34ch; margin: 0; }
+.standard::before { content: "Standard"; display: block; font: 500 11px var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.stat { background: var(--panel); padding: 18px 18px 16px; display: grid; gap: 4px; }
+.stat .v { font: 700 44px/1 var(--f-display); font-stretch: 85%; font-variant-numeric: tabular-nums; }
+.stat .v small { font-size: 18px; color: var(--muted); font-weight: 500; }
+.stat .k { font-size: 13px; color: var(--muted); }
+.stat .src { font: 11px var(--f-mono); color: var(--accent); margin-top: 6px; }
+.provenance { display: flex; flex-wrap: wrap; gap: 8px 22px; font: 12px var(--f-mono); color: var(--muted); }
+.provenance .sample { color: var(--sample); }
+.learned { display: inline-flex; gap: 10px; align-items: baseline; font-size: 14px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 14px; }
+.learned b { font: 500 11px var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.learned a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--accent); }
+
+/* frame 3: Experience page */
+.exp { padding-bottom: 40px; }
+.exp-head { padding: 24px 28px 28px 64px; display: grid; gap: 10px; }
+.exp-head h2 { font: 800 56px/.95 var(--f-display); font-stretch: 78%; margin: 0; }
+.exp-head p { color: var(--muted); margin: 0; max-width: 60ch; }
+.toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; padding: 3px; font: 500 12px var(--f-mono); width: max-content; margin-top: 8px; }
+.toggle span { padding: 6px 14px; border-radius: 999px; color: var(--muted); }
+.toggle .on { background: var(--ink); color: var(--bg); }
+.groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; padding: 0 28px 0 64px; }
+.group { border-top: 2px solid var(--line); padding-top: 14px; display: grid; gap: 14px; align-content: start; }
+.group.lead { border-top-color: var(--accent); }
+.group h3 { font: 700 22px/1.1 var(--f-display); font-stretch: 85%; margin: 0; }
+.item { display: grid; gap: 2px; }
+.item .t { font-weight: 500; }
+.item .w { font: 12px var(--f-mono); color: var(--muted); }
+.item.target { background: rgba(77,124,255,.1); margin: 0 -10px; padding: 8px 10px; border-radius: 6px; outline: 1px solid rgba(77,124,255,.4); }
+.timeline { margin: 34px 28px 0 64px; display: grid; grid-template-columns: repeat(9, 1fr); font: 11px var(--f-mono); color: var(--muted); border-top: 1px solid var(--line); }
+.timeline div { padding-top: 8px; }
+.bars { margin: 10px 28px 0 64px; display: grid; gap: 6px; }
+.bar { height: 6px; border-radius: 3px; background: var(--muted); opacity: .5; }
+.bar.ai { background: var(--accent); opacity: 1; }
+
+@media (max-width: 820px) {
+  .rail { display: none; }
+  .hero-body, .ch-body, .exp-head, .groups, .phases, .timeline, .bars { padding-left: 24px; padding-right: 24px; margin-left: 0; margin-right: 0; }
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .groups { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+</style>
+</head>
+<body>
+<div class="review">
+  <header>
+    <h1>Early mockups</h1>
+    <p>Three frames to react to before the full design phase: the opening screen, one pinned chapter (Test), and the Experience page. Layout and tone only. Motion is hinted, not designed, and every number is a sample.</p>
+  </header>
+
+  <!-- FRAME 1 -->
+  <section>
+    <div class="frame-label"><span>Frame 1 · Opening screen</span><span>first 5 seconds</span></div>
+    <div class="frame hero">
+      <nav class="nav"><span class="brand">Hedayat Tabesh</span><span class="links"><span class="on">Method</span><span>Experience</span><span class="soon">Projects · soon</span></span></nav>
+      <div class="hero-body">
+        <span class="kicker">AI Solution Architect · Vancouver</span>
+        <h2><span class="line">Designed to ship.</span><span class="line">Built to standard.</span></h2>
+        <p class="sub">This site is the proof. Scroll to see how it was <b>planned, designed, built, tested and delivered</b>, with real records at every step.</p>
+      </div>
+      <div class="phases">
+        <span><b>01 Plan</b>requirements</span><span><b>02 Design</b>system</span><span><b>03 Build</b>agents + review</span><span><b>04 Test</b>live results</span><span><b>05 Deliver</b>releases</span>
+      </div>
+    </div>
+    <p class="note"><b>Intent:</b> title and direction readable in five seconds, with no field-ops jargon. The five phases preview the scroll story and become the side rail once you start scrolling. "Experience" stays in the nav at all times for recruiters who want to skip the story.</p>
+  </section>
+
+  <!-- FRAME 2 -->
+  <section>
+    <div class="frame-label"><span>Frame 2 · Chapter 04 · Test (pinned while scrolling)</span><span>live numbers</span></div>
+    <div class="frame chapter">
+      <nav class="nav"><span class="brand">Hedayat Tabesh</span><span class="links"><span class="on">Method</span><span>Experience</span><span class="soon">Projects · soon</span></span></nav>
+      <div class="rail"><span class="done">Plan</span><span class="done">Design</span><span class="done">Build</span><span class="now">Test</span><span>Deliver</span></div>
+      <div class="ch-body">
+        <div>
+          <div class="ch-num"><em>04</em> / 05 · Test</div>
+          <h2>Nothing ships on<br>an AI's word alone.</h2>
+        </div>
+        <p class="standard">Every change is checked by machines and reviewed by a person before it goes live. These are the results from this site's latest release.</p>
+        <div class="stats">
+          <div class="stat"><span class="v">100<small>/100</small></span><span class="k">Performance</span><span class="src">Lighthouse CI ↗</span></div>
+          <div class="stat"><span class="v">0</span><span class="k">Accessibility violations</span><span class="src">axe · 14 pages ↗</span></div>
+          <div class="stat"><span class="v">212</span><span class="k">Tests passing</span><span class="src">Vitest + Playwright ↗</span></div>
+          <div class="stat"><span class="v">38</span><span class="k">Pull requests reviewed</span><span class="src">GitHub ↗</span></div>
+        </div>
+        <div class="provenance"><span class="sample">● Sample numbers</span><span>Run #128 · 26 Oct 2026 · 14:02 PT</span><span>Read from stats.json at page load</span></div>
+        <div class="learned"><b>Learned on</b><a href="#">running test cycles through milestone sign-off for a major utility →</a></div>
+      </div>
+    </div>
+    <p class="note"><b>Intent:</b> each chapter has the same four parts: headline, the standard in one sentence, live evidence with where it came from, and a "learned on" link to the Experience page. The headline pins while the stats count up from zero as you scroll in. The amber label marks sample data so it can't reach launch unnoticed.</p>
+  </section>
+
+  <!-- FRAME 3 -->
+  <section>
+    <div class="frame-label"><span>Frame 3 · Experience page</span><span>scannable · grouped by skill</span></div>
+    <div class="frame exp">
+      <nav class="nav"><span class="brand">Hedayat Tabesh</span><span class="links"><span>Method</span><span class="on">Experience</span><span class="soon">Projects · soon</span></span></nav>
+      <div class="exp-head">
+        <h2>Experience</h2>
+        <p>Eight years across AI delivery, enterprise integration and data. Arrived here from a "learned on" link? The matching entry is highlighted.</p>
+        <div class="toggle"><span class="on">By skill</span><span>By date</span></div>
+      </div>
+      <div class="groups">
+        <div class="group lead">
+          <h3>AI delivery</h3>
+          <div class="item"><span class="t">Agent orchestration: wireframes to system configuration</span><span class="w">PwC · 2024–26</span></div>
+          <div class="item"><span class="t">Documentation standards for an in-house agent framework</span><span class="w">PwC · 2024–26</span></div>
+          <div class="item"><span class="t">Custom agents and team LLM upskilling</span><span class="w">PwC · 2024–26</span></div>
+          <div class="item"><span class="t">Image classifier, 80% accuracy on unseen data</span><span class="w">Digital Democracies Institute · 2019–21</span></div>
+        </div>
+        <div class="group">
+          <h3>Architecture &amp; delivery</h3>
+          <div class="item"><span class="t">End-to-end solution architecture for an enterprise rollout</span><span class="w">PwC · 2024–26</span></div>
+          <div class="item"><span class="t">Integration contracts between two enterprise platforms</span><span class="w">PwC · 2024–26</span></div>
+          <div class="item target"><span class="t">Test cycles run through milestone sign-off</span><span class="w">PwC · 2024–26</span></div>
+          <div class="item"><span class="t">Remote go-lives with few issues</span><span class="w">IFS · 2021–24</span></div>
+        </div>
+        <div class="group">
+          <h3>Data &amp; platforms</h3>
+          <div class="item"><span class="t">University data warehouse: ETL, cubes, reporting</span><span class="w">Simon Fraser University · 2018–21</span></div>
+          <div class="item"><span class="t">Research web app (Django, Celery, PostgreSQL)</span><span class="w">Digital Democracies Institute · 2019–21</span></div>
+          <div class="item"><span class="t">Server architecture for large research datasets</span><span class="w">Digital Democracies Institute · 2019–21</span></div>
+        </div>
+      </div>
+      <div class="timeline"><div>2018</div><div>2019</div><div>2020</div><div>2021</div><div>2022</div><div>2023</div><div>2024</div><div>2025</div><div>2026</div></div>
+      <div class="bars">
+        <div class="bar" style="margin-left:0;width:36%"></div>
+        <div class="bar ai" style="margin-left:11%;width:25%"></div>
+        <div class="bar" style="margin-left:36%;width:36%"></div>
+        <div class="bar ai" style="margin-left:72%;width:28%"></div>
+      </div>
+    </div>
+    <p class="note"><b>Intent:</b> AI delivery leads. Problems are described in general terms, with no client or internal tool names. A "By date" toggle keeps the classic résumé view for recruiters. The timeline shows the AI work bookending the career (blue bars).</p>
+  </section>
+</div>
+</body>
+</html>
