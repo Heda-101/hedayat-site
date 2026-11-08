@@ -233,6 +233,29 @@ test('R23b: an .md/.astro/.css-only agent push has no hold and passes', () => {
   assert.match(r.out, /AI review passed/);
 });
 
+// Fix round 3: git's pathspec-mode env (set by `git --literal-pathspecs push` etc.) must not
+// empty the guard's own git calls.
+const PATHSPEC_MODES = ['GIT_LITERAL_PATHSPECS', 'GIT_GLOB_PATHSPECS', 'GIT_NOGLOB_PATHSPECS', 'GIT_ICASE_PATHSPECS'];
+
+test('R23c: the binary hold still fires under each pathspec-mode env', () => {
+  const dir = mkRepo();
+  const base = head(dir);
+  commitFiles(dir, { 'z.dat': Buffer.from('a\0b') });
+  const agent = { CLAUDECODE: '1', GUARD_AI_CMD: path.join(ROOT, 'tests/guard/fixtures/fake-claude-pass.sh'), GUARD_TTY: '/nonexistent' };
+  for (const mode of PATHSPEC_MODES) {
+    const r = runPush(dir, refFor(dir, base), { ...agent, [mode]: '1' });
+    assert.equal(r.status, 1, `${mode}: ${r.out}`);
+    assert.match(r.stdout, /binary file needs confirmation: z\.dat/, mode);
+  }
+});
+
+test('R23c: a mixed-case .GitAttributes is held too', () => {
+  const dir = mkRepo();
+  const base = head(dir);
+  commitFiles(dir, { '.GitAttributes': '*.txt -diff\n', 'sub/.GITATTRIBUTES': '* diff\n', 'q.txt': 'hello\n' });
+  assert.deepEqual(heldFilesInPush([refFor(dir, base)], dir).sort(), ['.GitAttributes', 'sub/.GITATTRIBUTES']);
+});
+
 test('R23: the prompt names images and binary files', () => {
   const f = tty('n\n');
   const r = spawnSync(process.execPath, ['--input-type=module', '-e',

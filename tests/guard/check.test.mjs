@@ -313,6 +313,21 @@ test('F1 fix round 2: ssh ls-remote runs in batch mode, keeping an existing ssh 
   assert.ok(got.split('\n').some((l) => l.startsWith('-p 2222 -oBatchMode=yes')), got);
 });
 
+test('R23c: a real `git --literal-pathspecs push` from an agent shell still holds a binary', () => {
+  const dir = mkRepoWithOrigin();
+  const env = { ...hooked(dir), CLAUDECODE: '1', GUARD_AI_CMD: fake('pass'), GUARD_TTY: '/nonexistent' };
+  git(dir, ['checkout', '-q', '-b', 'feat/z']);
+  fs.writeFileSync(path.join(dir, 'z.dat'), Buffer.from('a\0b'));
+  git(dir, ['add', 'z.dat']);
+  git(dir, ['commit', '-q', '-m', 'z'], { env });
+  for (const flag of ['--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs']) {
+    const r = git(dir, [flag, 'push', '-q', 'origin', 'feat/z'], { env, allowFail: true });
+    assert.notEqual(r.status, 0, `${flag}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stdout + r.stderr, /binary file needs confirmation: z\.dat/, flag);
+  }
+  assert.equal(git(dir, ['ls-remote', '--heads', 'origin', 'feat/z']).stdout.trim(), '');
+});
+
 test('F1: a new branch or an unknown remote tip blocks when the remote cannot be listed', () => {
   const dir = mkRepoWithOrigin();
   fs.writeFileSync(path.join(dir, 'n.md'), 'clean\n');

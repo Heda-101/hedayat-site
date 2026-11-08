@@ -5,10 +5,24 @@ const ZERO = /^0+$/;
 const MAX = 1024 * 1024 * 1024;
 const MARK = '\x01GUARD-COMMIT ';
 
+// The pathspec-mode variables git sets for its children (`git --literal-pathspecs push` sets
+// GIT_LITERAL_PATHSPECS=1 for the pre-push hook). Inherited, they turn the guard's own
+// pathspecs (`:(top)`, exclusions) into no-ops or wrong matches, so scans see nothing.
+const PATHSPEC_MODE_VARS = ['GIT_LITERAL_PATHSPECS', 'GIT_GLOB_PATHSPECS', 'GIT_NOGLOB_PATHSPECS', 'GIT_ICASE_PATHSPECS'];
+
+// The one environment for every git process the guard starts (directly, or via gitleaks):
+// pathspec modes removed, replace refs ignored (they could show the guard different objects
+// than the ones pushed), plus any extra variables.
+export function gitEnv(extra = {}) {
+  const env = { ...process.env };
+  for (const k of PATHSPEC_MODE_VARS) delete env[k];
+  return { ...env, GIT_NO_REPLACE_OBJECTS: '1', ...extra };
+}
+
 export function git(args, cwd) {
   return execFileSync('git', ['-c', 'core.quotepath=off', '-c', 'color.ui=never', '-c', 'color.diff=never',
     '-c', 'log.showRoot=true', '-c', 'diff.relative=false', ...args], {
-    cwd, encoding: 'utf8', maxBuffer: MAX, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd, encoding: 'utf8', maxBuffer: MAX, stdio: ['ignore', 'pipe', 'pipe'], env: gitEnv(),
   });
 }
 
@@ -88,7 +102,7 @@ export function liveRemoteTips(remote, cwd) {
     // of waiting on a hidden prompt
     out = execFileSync('git', ['ls-remote', remote], {
       cwd, encoding: 'utf8', maxBuffer: MAX, timeout: LS_REMOTE_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_SSH_COMMAND: batchSshCommand(cwd) },
+      env: gitEnv({ GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_SSH_COMMAND: batchSshCommand(cwd) }),
     });
   } catch {
     throw new GuardError('REMOTE_UNLISTED', NO_LIST);
@@ -101,7 +115,7 @@ export function liveRemoteTips(remote, cwd) {
   if (shas.size === 0) return [];
   // one batch lookup; objects missing here are skipped, annotated tags count via their ^{} line
   const types = execFileSync('git', ['cat-file', '--batch-check=%(objectname) %(objecttype)'], {
-    cwd, encoding: 'utf8', maxBuffer: MAX, input: `${[...shas].join('\n')}\n`, stdio: ['pipe', 'pipe', 'pipe'],
+    cwd, encoding: 'utf8', maxBuffer: MAX, input: `${[...shas].join('\n')}\n`, stdio: ['pipe', 'pipe', 'pipe'], env: gitEnv(),
   });
   return types.split('\n').map((l) => l.split(' ')).filter(([sha, type]) => type === 'commit' && shas.has(sha)).map(([sha]) => sha);
 }
@@ -226,7 +240,7 @@ export function isBinaryContent(buf) {
 export function contentIsBinary(sha, p, cwd) {
   let blob;
   try {
-    blob = execFileSync('git', ['cat-file', 'blob', `${sha}:${p}`], { cwd, maxBuffer: MAX, stdio: ['ignore', 'pipe', 'ignore'] });
+    blob = execFileSync('git', ['cat-file', 'blob', `${sha}:${p}`], { cwd, maxBuffer: MAX, stdio: ['ignore', 'pipe', 'ignore'], env: gitEnv() });
   } catch (e) {
     if (typeof e.status === 'number') return null;
     throw e;

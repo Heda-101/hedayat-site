@@ -275,8 +275,9 @@ const GIT_READONLY = new Set(['status', 'diff', 'log', 'show', 'blame', 'annotat
   'shortlog', 'whatchanged', 'cat-file']);
 const GIT_RUNS_COMMANDS = new Set(['submodule', 'rebase', 'bisect', 'worktree', 'mergetool', 'difftool']);
 const SAFE_DASH_C = /^(color\.[\w.-]+|core\.quotepath|log\.[\w.-]+|diff\.(relative|renames|noprefix|mnemonicprefix)|advice\.[\w.-]+|user\.(name|email)|init\.defaultbranch|commit\.gpgsign|pull\.rebase|pull\.ff|merge\.ff|status\.[\w.-]+|fetch\.prune)=/i;
-const GIT_GLOBAL_FLAGS = new Set(['-p', '-P', '--paginate', '--no-pager', '--no-replace-objects', '--literal-pathspecs',
-  '--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs', '--no-optional-locks', '--no-advice', '--version',
+// No pathspec-mode flags (--literal-pathspecs etc.): git passes them to the hooks as env.
+const GIT_GLOBAL_FLAGS = new Set(['-p', '-P', '--paginate', '--no-pager', '--no-replace-objects',
+  '--no-optional-locks', '--no-advice', '--version',
   '--help', '-h']);
 const INTERPRETERS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'csh', 'tcsh', 'eval', 'source', '.',
   'xargs', 'parallel', 'python', 'python2', 'python3', 'node', 'deno', 'bun', 'perl', 'ruby', 'php', 'lua', 'osascript',

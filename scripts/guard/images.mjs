@@ -9,7 +9,7 @@ export function isImagePath(p) {
 
 // .gitattributes at any depth: it changes how git diffs (and so how tools read) other files.
 export function isAttributesPath(p) {
-  return /(^|\/)\.gitattributes$/.test(p);
+  return /(^|\/)\.gitattributes$/i.test(p); // any case: the Mac file system ignores it
 }
 
 // Files a human must confirm (R23), anywhere in the pushed ranges, when a commit adds, modifies,

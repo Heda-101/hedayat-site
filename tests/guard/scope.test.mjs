@@ -240,6 +240,39 @@ test('R23b: a commit over the cap that holds a binary is split without inlining 
   assert.ok(b.every((x) => Buffer.byteLength(x.diff) <= 200_000));
 });
 
+// Fix round 3: pathspec-mode env from `git --<mode>-pathspecs push` must not empty the AI diff.
+function withEnv(vars, fn) {
+  const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+  Object.assign(process.env, vars);
+  try { return fn(); } finally {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
+}
+
+test('R23c: the AI diff keeps its content under each pathspec-mode env', () => {
+  const dir = batchRepo();
+  const base = head(dir);
+  commit(dir, { 'n.md': 'plain words\n', 'z.dat': Buffer.from('a\0b') }, 'mixed');
+  for (const mode of ['GIT_LITERAL_PATHSPECS', 'GIT_GLOB_PATHSPECS', 'GIT_NOGLOB_PATHSPECS', 'GIT_ICASE_PATHSPECS']) {
+    const b = withEnv({ [mode]: '1' }, () => reviewBatchesForPush(refsFor(dir, base), dir));
+    assert.equal(b.length, 1, mode);
+    assert.match(b[0].diff, /\+plain words/, mode);
+    assert.deepEqual(b[0].binaryPaths, ['z.dat'], mode);
+  }
+});
+
+test('R23c: under icase pathspecs, excluding a binary does not drop a text file differing only in case', () => {
+  const dir = batchRepo();
+  const base = head(dir);
+  const hash = (data) => spawnSync('git', ['hash-object', '-w', '--stdin'], { cwd: dir, input: data }).stdout.toString().trim();
+  sh(dir, ['update-index', '--add', '--cacheinfo', `100644,${hash(Buffer.from('bin\0x'))},secret.bin`,
+    '--cacheinfo', `100644,${hash('upper case words\n')},SECRET.BIN`]);
+  sh(dir, ['commit', '-q', '-m', 'case pair']);
+  const b = withEnv({ GIT_ICASE_PATHSPECS: '1' }, () => reviewBatchesForPush(refsFor(dir, base), dir));
+  assert.match(b[0].diff, /\+upper case words/);
+  assert.deepEqual(b[0].binaryPaths, ['secret.bin']);
+});
+
 test('F2 fix 4: a deleted binary is not listed in binaryPaths', () => {
   const dir = batchRepo();
   commit(dir, { 'gone.png': Buffer.from([0x89, 0x50, 0, 0, 1]), 'stay.png': Buffer.from([0x89, 0, 2]) }, 'add');

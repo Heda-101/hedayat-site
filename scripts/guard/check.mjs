@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { loadTerms, findTerms, GuardError, clean } from './terms.mjs';
 import { heldFilesInPush, confirmImages, isImagePath, isAttributesPath } from './images.mjs';
-import { collectStaged, collectPush, collectRange, parsePushRefs, effectiveRevs, reviewBatchesForPush } from './scope.mjs';
+import { collectStaged, collectPush, collectRange, parsePushRefs, effectiveRevs, reviewBatchesForPush, gitEnv } from './scope.mjs';
 import { reviewDiff, REVIEW_TIMEOUT_MS } from './ai-review.mjs';
 
 const HINT = 'create ~/.config/hedayat-site/blocked-terms.txt with at least one term';
@@ -66,8 +66,9 @@ function scan(items, terms) {
 // Returns masked output lines; an empty array means gitleaks passed.
 function gitleaksLines(args, terms, cwd) {
   try {
+    // gitleaks runs git itself, so it gets the guard's git environment (scope.mjs gitEnv)
     execFileSync('gitleaks', [...args, '--redact', '--no-banner'], {
-      cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 256 * 1024 * 1024,
+      cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 256 * 1024 * 1024, env: gitEnv(),
     });
     return [];
   } catch (e) {

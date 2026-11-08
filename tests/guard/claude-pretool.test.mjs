@@ -156,6 +156,15 @@ for (const c of allowed) {
   test(`allow: ${c}`, () => assert.deepEqual(classifyCommand(c, B), { action: 'allow' }));
 }
 
+test('R23c: pathspec-mode global flags are denied for agents', () => {
+  for (const flag of ['--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs']) {
+    for (const c of [`git ${flag} push origin feat/x`, `git ${flag} commit -m x`, `git ${flag} status`]) {
+      assert.equal(classifyCommand(c, B).action, 'deny', c);
+    }
+  }
+  assert.equal(classifyCommand('git --no-pager status', B).action, 'allow');
+});
+
 test('push of current branch is a push', () => {
   const want = { action: 'push', remote: 'origin', branch: 'feat/x' };
   assert.deepEqual(classifyCommand('git push -u origin feat/x', B), want);
