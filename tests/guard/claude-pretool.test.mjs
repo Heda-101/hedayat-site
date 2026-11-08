@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { classifyCommand } from '../../scripts/guard/claude-pretool.mjs';
+import { classifyCommand, ghTextItems } from '../../scripts/guard/claude-pretool.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const HOOK = path.join(ROOT, 'scripts/guard/claude-pretool.mjs');
@@ -156,6 +156,15 @@ for (const c of allowed) {
   test(`allow: ${c}`, () => assert.deepEqual(classifyCommand(c, B), { action: 'allow' }));
 }
 
+test('R23c: pathspec-mode global flags are denied for agents', () => {
+  for (const flag of ['--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs']) {
+    for (const c of [`git ${flag} push origin feat/x`, `git ${flag} commit -m x`, `git ${flag} status`]) {
+      assert.equal(classifyCommand(c, B).action, 'deny', c);
+    }
+  }
+  assert.equal(classifyCommand('git --no-pager status', B).action, 'allow');
+});
+
 test('push of current branch is a push', () => {
   const want = { action: 'push', remote: 'origin', branch: 'feat/x' };
   assert.deepEqual(classifyCommand('git push -u origin feat/x', B), want);
@@ -289,7 +298,7 @@ test('hook blocks any new image because agents cannot confirm', () => {
   const r = hook(bash('git push', dir), { env: { GUARD_TTY: yes } });
   assert.equal(r.status, 2, r.out);
   assert.match(r.out, /p\.png/);
-  assert.match(r.out, /Hedayat must push image changes himself/);
+  assert.match(r.out, /Hedayat must push image and binary file changes himself/);
 });
 
 test('hook blocks a push when the terms file is missing', () => {
@@ -316,6 +325,47 @@ test('hook scans only commits after the remote tracking tip', () => {
   commitFile(dir, 'c.md', 'clean words\n');
   const r = hook(bash('git push', dir));
   assert.equal(r.status, 0, r.out);
+});
+
+test('F1: hook checks against the live origin, not a stale tracking ref', () => {
+  const dir = repo();
+  commitFile(dir, 'b.md', 'Acme Corp\n');
+  gitIn(dir, ['push', '-q', '-u', 'origin', 'feat/x']);
+  const origin = gitIn(dir, ['remote', 'get-url', 'origin']).trim();
+  gitIn(origin, ['branch', '-q', '-D', 'feat/x']); // gone on the server; origin/feat/x stays here
+  const r = hook(bash('git push', dir));
+  assert.equal(r.status, 2, r.out);
+  assert.match(r.out, /blocked-term #1 at b\.md:1/);
+  assert.doesNotMatch(r.out, /acme/i);
+});
+
+test('F1 fix 1: hook lists origin\'s push URL, not its fetch URL', () => {
+  const dir = repo();
+  const origin = gitIn(dir, ['remote', 'get-url', 'origin']).trim();
+  const mirror = tmp('guard-hookmirror-');
+  gitIn(mirror, ['init', '-q', '--bare', '-b', 'main']);
+  commitFile(dir, 'b.md', 'Acme Corp\n');
+  gitIn(dir, ['push', '-q', mirror, 'feat/x']); // the mirror has the commit, origin does not
+  gitIn(dir, ['remote', 'set-url', 'origin', mirror]);
+  gitIn(dir, ['remote', 'set-url', '--push', 'origin', origin]);
+  const r = hook(bash('git push -u origin feat/x', dir));
+  assert.equal(r.status, 2, r.out);
+  assert.match(r.out, /blocked-term #1 at b\.md:1/);
+  // pushInsteadOf rewrites the push URL the same way
+  gitIn(dir, ['config', '--unset', 'remote.origin.pushurl']);
+  gitIn(dir, ['config', `url.${origin}.pushInsteadOf`, mirror]);
+  const r2 = hook(bash('git push -u origin feat/x', dir));
+  assert.equal(r2.status, 2, r2.out);
+  assert.match(r2.out, /blocked-term #1 at b\.md:1/);
+});
+
+test('F1: hook blocks a push when origin cannot be listed', () => {
+  const dir = repo();
+  commitFile(dir, 'b.md', 'clean words\n');
+  gitIn(dir, ['remote', 'set-url', 'origin', path.join(tmp('guard-gone-'), 'missing.git')]);
+  const r = hook(bash('git push -u origin feat/x', dir));
+  assert.equal(r.status, 2, r.out);
+  assert.match(r.out, /could not list the remote/);
 });
 
 test('hook denies a push on a detached HEAD', () => {
@@ -576,6 +626,16 @@ test('I5: clean gh text and other gh commands pass', () => {
     'gh pr create --fill', 'echo high and right']) {
     const r = hook(bash(c, dir));
     assert.equal(r.status, 0, `${c}: ${r.out}`);
+  }
+});
+
+test('F3: gh subcommands named like Object members follow the normal rules', () => {
+  const dir = tmp('guard-gh-');
+  for (const c of ['gh constructor x', 'gh __proto__ create', 'gh toString x', 'gh hasOwnProperty x', 'gh pr constructor x']) {
+    const r = hook(bash(c, dir));
+    assert.equal(r.status, 0, `${c}: ${r.out}`);
+    assert.doesNotMatch(r.out, /internal error/, c);
+    assert.equal(ghTextItems(c), null, c);
   }
 });
 

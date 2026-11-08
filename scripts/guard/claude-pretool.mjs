@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { gitEnv } from './scope.mjs'; // the one environment for the guard's git calls
 
 const NESTED = 'nested shell around git is not allowed for agents';
 const PUSH_ONLY = 'agents push only the current branch; ask Hedayat for anything else';
@@ -275,8 +276,9 @@ const GIT_READONLY = new Set(['status', 'diff', 'log', 'show', 'blame', 'annotat
   'shortlog', 'whatchanged', 'cat-file']);
 const GIT_RUNS_COMMANDS = new Set(['submodule', 'rebase', 'bisect', 'worktree', 'mergetool', 'difftool']);
 const SAFE_DASH_C = /^(color\.[\w.-]+|core\.quotepath|log\.[\w.-]+|diff\.(relative|renames|noprefix|mnemonicprefix)|advice\.[\w.-]+|user\.(name|email)|init\.defaultbranch|commit\.gpgsign|pull\.rebase|pull\.ff|merge\.ff|status\.[\w.-]+|fetch\.prune)=/i;
-const GIT_GLOBAL_FLAGS = new Set(['-p', '-P', '--paginate', '--no-pager', '--no-replace-objects', '--literal-pathspecs',
-  '--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs', '--no-optional-locks', '--no-advice', '--version',
+// No pathspec-mode flags (--literal-pathspecs etc.): git passes them to the hooks as env.
+const GIT_GLOBAL_FLAGS = new Set(['-p', '-P', '--paginate', '--no-pager', '--no-replace-objects',
+  '--no-optional-locks', '--no-advice', '--version',
   '--help', '-h']);
 const INTERPRETERS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'csh', 'tcsh', 'eval', 'source', '.',
   'xargs', 'parallel', 'python', 'python2', 'python3', 'node', 'deno', 'bun', 'perl', 'ruby', 'php', 'lua', 'osascript',
@@ -586,7 +588,7 @@ export function ghTextItems(cmd) {
     const t = unwrap(p.toks).toks;
     if (!t.length || t[0].dyn || base(t[0].v).toLowerCase() !== 'gh') continue;
     if ((t[1] && t[1].dyn) || (t[2] && t[2].dyn)) return { error: 'gh commands with shell expansions in the command name are not allowed for agents' };
-    const subs = t[1] && GH_TEXT_SUBS[t[1].v];
+    const subs = t[1] && Object.hasOwn(GH_TEXT_SUBS, t[1].v) ? GH_TEXT_SUBS[t[1].v] : null;
     if (!subs || !t[2] || !subs.includes(t[2].v)) continue;
     found = true;
     for (let k = 3; k < t.length; k++) {
@@ -648,7 +650,7 @@ function allow() { process.exit(0); }
 function currentBranch(cwd) {
   try {
     return execFileSync('git', ['symbolic-ref', '--short', '-q', 'HEAD'], {
-      cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: gitEnv(),
     }).trim() || null;
   } catch (e) {
     if (typeof e.status === 'number') return null; // detached HEAD or not a repository
@@ -666,11 +668,15 @@ async function pushFlow(cwd, branch) {
   const mask = (s) => (findTerms(s, terms).length ? '[withheld]' : s);
 
   const localSha = git(['rev-parse', '--verify', 'HEAD^{commit}'], cwd).trim();
-  let remoteSha = Z;
-  try { remoteSha = git(['rev-parse', '--verify', '-q', `refs/remotes/origin/${branch}^{commit}`], cwd).trim() || Z; }
-  catch { remoteSha = Z; }
+  // No remote sha here: a local origin/<branch> can be stale (deleted on the server), so the
+  // checks cover every commit not on the live branch and tag tips (git ls-remote) of each URL
+  // git pushes origin to. That is the push URL (pushurl, pushInsteadOf), never the fetch URL,
+  // which can be a different repository.
+  let pushUrls = [];
+  try { pushUrls = git(['remote', 'get-url', '--push', '--all', 'origin'], cwd).split('\n').map((u) => u.trim()).filter(Boolean); }
+  catch { pushUrls = []; }
+  if (pushUrls.length === 0) block("guard: could not read origin's push URL, blocking");
   const ref = `refs/heads/${branch}`;
-  const refs = [{ localRef: ref, localSha, remoteRef: ref, remoteSha }];
 
   // Make sure git would push exactly this branch to origin/<branch>.
   const cfg = (key) => { try { return git(['config', '--get', key], cwd).trim(); } catch { return ''; } };
@@ -681,11 +687,14 @@ async function pushFlow(cwd, branch) {
   try { pushTarget = git(['rev-parse', '--abbrev-ref', `${branch}@{push}`], cwd).trim(); } catch { pushTarget = ''; }
   if (pushTarget && pushTarget !== `origin/${branch}`) block(`guard: this branch pushes to ${mask(clean(pushTarget))}; ${PUSH_ONLY}`);
 
-  const checks = runPushChecks(refs, { cwd, terms }); // no tty: any new image blocks
-  if (!checks.ok) {
-    const lines = checks.lines.map((l) => `guard: ${l.replace(/^guard: /, '')}`);
-    if (checks.images.length) lines.push('guard: Hedayat must push image changes himself');
-    block(lines);
+  for (const url of pushUrls) {
+    const refs = [{ localRef: ref, localSha, remoteRef: ref, remoteSha: Z, remote: url }];
+    const checks = runPushChecks(refs, { cwd, terms }); // no tty: any new image or binary blocks
+    if (!checks.ok) {
+      const lines = checks.lines.map((l) => `guard: ${l.replace(/^guard: /, '')}`);
+      if (checks.images.length) lines.push('guard: Hedayat must push image and binary file changes himself (and .gitattributes changes)');
+      block(lines);
+    }
   }
 
   // The AI review follows in the pre-push hook of the push itself (R18a, R22).
@@ -701,7 +710,7 @@ const STATE_CHANGING = new Set(['commit', 'push', 'merge', 'rebase', 'cherry-pic
 // executable files (not symlinks), and scripts/guard/check.mjs exists. Any error = not intact.
 export function hooksIntact(cwd) {
   try {
-    const run = (args, dir) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const run = (args, dir) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: gitEnv() }).trim();
     const top = run(['rev-parse', '--show-toplevel'], cwd);
     if (run(['config', '--get', 'core.hooksPath'], top) !== '.githooks') return false;
     for (const h of ['pre-commit', 'commit-msg', 'pre-push']) {

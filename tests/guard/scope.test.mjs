@@ -47,16 +47,21 @@ test('parsePushRefs reads hook stdin lines', () => {
     { localRef: 'refs/heads/y', localSha: a, remoteRef: 'refs/heads/y', remoteSha: Z },
   ]);
   assert.deepEqual(parsePushRefs(''), []);
+  assert.deepEqual(parsePushRefs(`refs/heads/x ${a} refs/heads/x ${b}\n`, 'origin'),
+    [{ localRef: 'refs/heads/x', localSha: a, remoteRef: 'refs/heads/x', remoteSha: b, remote: 'origin' }]);
 });
 
 test('pushRange: new branch, deletion, update', () => {
-  assert.deepEqual(pushRange({ localSha: 'a'.repeat(40), remoteSha: Z }).revs, ['a'.repeat(40), '--not', '--remotes']);
+  // a new branch is resolved against the remote's live tips (effectiveRevs), never local --remotes
+  assert.deepEqual(pushRange({ localSha: 'a'.repeat(40), remoteSha: Z }), { kind: 'new' });
   assert.equal(pushRange({ localSha: Z, remoteSha: 'b'.repeat(40) }).kind, 'delete');
   assert.deepEqual(pushRange({ localSha: 'a'.repeat(40), remoteSha: 'b'.repeat(40) }),
     { kind: 'range', revs: ['b'.repeat(40) + '..' + 'a'.repeat(40)] });
 });
 
 // ---------- R22: AI review input batched by commit ----------
+import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -146,12 +151,23 @@ test('R22: lockfiles are left out of the AI input only', () => {
   commit(dir, {
     'package-lock.json': filler(300_000, 'npm'), 'web/pnpm-lock.yaml': filler(1000, 'pnpm'),
     'yarn.lock': filler(1000, 'yarn'), 'Gemfile.lock': filler(1000, 'gem'), 'src/app.md': 'real change\n',
+    'bun.lockb': filler(1000, 'bun'), 'crate/Cargo.lock': filler(1000, 'cargo'), 'poetry.lock': filler(1000, 'poetry'),
+    'composer.lock': filler(1000, 'composer'),
   }, 'deps and app');
   const b = reviewBatchesForPush(refsFor(dir, base), dir);
   assert.equal(b.length, 1);
   assert.match(b[0].diff, /\+real change/);
   assert.match(b[0].diff, /deps and app/);
-  assert.doesNotMatch(b[0].diff, /npm filler|pnpm filler|yarn filler|gem filler/);
+  assert.doesNotMatch(b[0].diff, /npm filler|pnpm filler|yarn filler|gem filler|bun filler|cargo filler|poetry filler|composer filler/);
+});
+
+test('F3: only exact lockfile names are left out; other *.lock files reach the AI', () => {
+  const dir = batchRepo();
+  const base = head(dir);
+  commit(dir, { 'secrets.lock': 'kept one\n', 'conf/app.lock': 'kept two\n', 'my-yarn.lock': 'kept three\n' }, 'locks');
+  const b = reviewBatchesForPush(refsFor(dir, base), dir);
+  assert.equal(b.length, 1);
+  for (const t of ['kept one', 'kept two', 'kept three']) assert.match(b[0].diff, new RegExp(`\\+${t}`));
 });
 
 test('R22: binary paths are listed with the batch of their commit', () => {
@@ -160,6 +176,111 @@ test('R22: binary paths are listed with the batch of their commit', () => {
   commit(dir, { 'p.png': Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2]) }, 'picture');
   const b = reviewBatchesForPush(refsFor(dir, base), dir);
   assert.deepEqual(b[0].binaryPaths, ['p.png']);
+});
+
+// ---------- F2: binaries stay out of the AI diff ----------
+test('F2: a 250 KB image is listed as a binary path, not inlined into the AI diff', () => {
+  const dir = batchRepo();
+  const base = head(dir);
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0]), crypto.randomBytes(250_000)]);
+  commit(dir, { 'img/shot.png': png, 'notes.md': 'caption text\n' }, 'add a screenshot');
+  const b = reviewBatchesForPush(refsFor(dir, base), dir);
+  assert.equal(b.length, 1);
+  assert.ok(Buffer.byteLength(b[0].diff) < 5_000, `AI diff is ${Buffer.byteLength(b[0].diff)} bytes`);
+  assert.deepEqual(b[0].binaryPaths, ['img/shot.png']);
+  assert.match(b[0].diff, /\+caption text/);
+});
+
+test('F2: a text file marked binary by .gitattributes is still shown to the AI', () => {
+  const dir = batchRepo();
+  const base = head(dir);
+  commit(dir, { '.gitattributes': '*.md -diff\n*.txt binary\n', 'h.md': 'hidden words here\n', 'n.txt': 'note words here\n' }, 'attrs');
+  const b = reviewBatchesForPush(refsFor(dir, base), dir);
+  assert.equal(b.length, 1);
+  assert.match(b[0].diff, /\+hidden words here/);
+  assert.match(b[0].diff, /\+note words here/);
+});
+
+test('F2: a modified 250 KB image keeps the AI diff small', () => {
+  const dir = batchRepo();
+  commit(dir, { 'pic.png': Buffer.concat([Buffer.from([0x89, 0x50, 0, 0]), crypto.randomBytes(250_000)]) }, 'first');
+  const base = head(dir);
+  commit(dir, { 'pic.png': Buffer.concat([Buffer.from([0x89, 0x50, 0, 0]), crypto.randomBytes(250_000)]) }, 'replace');
+  const b = reviewBatchesForPush(refsFor(dir, base), dir);
+  assert.equal(b.length, 1);
+  assert.ok(Buffer.byteLength(b[0].diff) < 5_000);
+  assert.deepEqual(b[0].binaryPaths, ['pic.png']);
+});
+
+// Fix round 2: the AI diff decides "binary" from content, so an attribute cannot inline
+// compressed or UTF-16 bytes as text, nor hide text as binary.
+test('R23b: a "diff" attribute (in-tree or info/attributes) does not change what the AI gets', () => {
+  const dir = batchRepo();
+  const base = head(dir);
+  fs.mkdirSync(path.join(dir, '.git/info'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.git/info/attributes'), '*.txt diff\n');
+  const big = zlib.gzipSync(crypto.randomBytes(250_000));
+  commit(dir, { '.gitattributes': '*.dat diff\n', 'notes2.dat': big,
+    'u.txt': Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('hello world\n', 'utf16le')]), 'n.md': 'plain words\n' }, 'attrs');
+  const b = reviewBatchesForPush(refsFor(dir, base), dir);
+  assert.equal(b.length, 1);
+  assert.deepEqual([...b[0].binaryPaths].sort(), ['notes2.dat', 'u.txt']);
+  assert.ok(Buffer.byteLength(b[0].diff) < 5_000, `AI diff is ${Buffer.byteLength(b[0].diff)} bytes`);
+  assert.match(b[0].diff, /\+plain words/);
+  assert.match(b[0].diff, /\+\*\.dat diff/);
+});
+
+test('R23b: a commit over the cap that holds a binary is split without inlining it', () => {
+  const dir = batchRepo();
+  const base = head(dir);
+  commit(dir, { 'x.md': filler(120_000, 'x'), 'y.md': filler(120_000, 'y'), 'p.bin': crypto.randomBytes(250_000) }, 'mixed');
+  const b = reviewBatchesForPush(refsFor(dir, base), dir);
+  assert.equal(b.length, 2);
+  assert.deepEqual(b.flatMap((x) => x.binaryPaths), ['p.bin']);
+  assert.ok(b.every((x) => Buffer.byteLength(x.diff) <= 200_000));
+});
+
+// Fix round 3: pathspec-mode env from `git --<mode>-pathspecs push` must not empty the AI diff.
+function withEnv(vars, fn) {
+  const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+  Object.assign(process.env, vars);
+  try { return fn(); } finally {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
+}
+
+test('R23c: the AI diff keeps its content under each pathspec-mode env', () => {
+  const dir = batchRepo();
+  const base = head(dir);
+  commit(dir, { 'n.md': 'plain words\n', 'z.dat': Buffer.from('a\0b') }, 'mixed');
+  for (const mode of ['GIT_LITERAL_PATHSPECS', 'GIT_GLOB_PATHSPECS', 'GIT_NOGLOB_PATHSPECS', 'GIT_ICASE_PATHSPECS']) {
+    const b = withEnv({ [mode]: '1' }, () => reviewBatchesForPush(refsFor(dir, base), dir));
+    assert.equal(b.length, 1, mode);
+    assert.match(b[0].diff, /\+plain words/, mode);
+    assert.deepEqual(b[0].binaryPaths, ['z.dat'], mode);
+  }
+});
+
+test('R23c: under icase pathspecs, excluding a binary does not drop a text file differing only in case', () => {
+  const dir = batchRepo();
+  const base = head(dir);
+  const hash = (data) => spawnSync('git', ['hash-object', '-w', '--stdin'], { cwd: dir, input: data }).stdout.toString().trim();
+  sh(dir, ['update-index', '--add', '--cacheinfo', `100644,${hash(Buffer.from('bin\0x'))},secret.bin`,
+    '--cacheinfo', `100644,${hash('upper case words\n')},SECRET.BIN`]);
+  sh(dir, ['commit', '-q', '-m', 'case pair']);
+  const b = withEnv({ GIT_ICASE_PATHSPECS: '1' }, () => reviewBatchesForPush(refsFor(dir, base), dir));
+  assert.match(b[0].diff, /\+upper case words/);
+  assert.deepEqual(b[0].binaryPaths, ['secret.bin']);
+});
+
+test('F2 fix 4: a deleted binary is not listed in binaryPaths', () => {
+  const dir = batchRepo();
+  commit(dir, { 'gone.png': Buffer.from([0x89, 0x50, 0, 0, 1]), 'stay.png': Buffer.from([0x89, 0, 2]) }, 'add');
+  const base = head(dir);
+  sh(dir, ['rm', '-q', 'gone.png']);
+  commit(dir, { 'stay.png': Buffer.from([0x89, 0, 3]) }, 'drop one, change one');
+  const b = reviewBatchesForPush(refsFor(dir, base), dir);
+  assert.deepEqual(b[0].binaryPaths, ['stay.png']);
 });
 
 test('R22: an empty push has no batches; a deleted ref is skipped', () => {
