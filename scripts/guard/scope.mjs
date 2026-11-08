@@ -180,15 +180,18 @@ export const MAX_BATCHES = 10;
 export const LOCKFILE_PATHSPECS = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', '*.lock']
   .map((g) => `:(top,exclude,glob)**/${g}`);
 const PATHSPEC = ['--', ':(top)', ...LOCKFILE_PATHSPECS];
-const DIFF_OPTS = ['--root', '-m', '-r', '--text', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames'];
+// No --text here (F2): binaries show as "Binary files ... differ" and are listed in binaryPaths,
+// so an image does not fill the AI cap. collectRange (gitleaks and the term scan) keeps --text.
+const BASE_DIFF_OPTS = ['--root', '-m', '-r', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames'];
 const SPLIT = 'split this push into smaller pushes';
+const FIRST_FEW_BYTES = 8000; // git's own binary test: a NUL byte in the first 8000 bytes
 
 const tooLarge = (what) => new GuardError('AI_TOO_LARGE', `${what} is over the ${MAX_BATCH_BYTES}-byte AI review cap; ${SPLIT}`);
 const bytes = (s) => Buffer.byteLength(s);
 
-function binaryPathsOf(sha, cwd) {
+function binaryPathsOf(sha, opts, cwd) {
   const out = [];
-  const numstat = git(['diff-tree', '--numstat', '--no-commit-id', '-z', ...DIFF_OPTS, sha, ...PATHSPEC], cwd);
+  const numstat = git(['diff-tree', '--numstat', '--no-commit-id', '-z', ...opts, sha, ...PATHSPEC], cwd);
   for (const entry of numstat.split('\0')) {
     const m = /^\n*(-|\d+)\t(-|\d+)\t([\s\S]*)$/.exec(entry);
     if (m && m[1] === '-' && m[2] === '-' && !out.includes(m[3])) out.push(m[3]);
@@ -196,19 +199,41 @@ function binaryPathsOf(sha, cwd) {
   return out;
 }
 
+// True when git would call the file binary on content alone (no .gitattributes). A path gone
+// from the commit (a deletion) counts as binary: there is no new content to show.
+function contentIsBinary(sha, p, cwd) {
+  let blob;
+  try {
+    blob = execFileSync('git', ['cat-file', 'blob', `${sha}:${p}`], { cwd, maxBuffer: MAX, stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch (e) {
+    if (typeof e.status === 'number') return true;
+    throw e;
+  }
+  return blob.subarray(0, FIRST_FEW_BYTES).includes(0);
+}
+
+// Diff options for one commit. A text file that .gitattributes marks binary (-diff, binary)
+// must not hide from the AI, so any such file puts the whole commit back on --text.
+function diffOptsFor(sha, cwd) {
+  const binaries = binaryPathsOf(sha, BASE_DIFF_OPTS, cwd);
+  const real = binaries.filter((p) => contentIsBinary(sha, p, cwd));
+  const opts = real.length < binaries.length ? [...BASE_DIFF_OPTS, '--text'] : BASE_DIFF_OPTS;
+  return { opts, binaryPaths: real };
+}
+
 // One commit as review units: the whole commit, or (when over the cap) its header plus one file each.
 function commitUnits(sha, cwd) {
   const short = sha.slice(0, 7);
-  const whole = git(['diff-tree', '--always', '-p', '--pretty=fuller', ...DIFF_OPTS, sha, ...PATHSPEC], cwd);
-  const binaryPaths = binaryPathsOf(sha, cwd);
+  const { opts: diffOpts, binaryPaths } = diffOptsFor(sha, cwd);
+  const whole = git(['diff-tree', '--always', '-p', '--pretty=fuller', ...diffOpts, sha, ...PATHSPEC], cwd);
   if (bytes(whole) <= MAX_BATCH_BYTES) return [{ diff: whole, binaryPaths }];
   const header = git(['show', '-s', '--pretty=fuller', sha], cwd);
-  const names = [...new Set(git(['diff-tree', '--name-only', '--no-commit-id', '-z', ...DIFF_OPTS, sha, ...PATHSPEC], cwd)
+  const names = [...new Set(git(['diff-tree', '--name-only', '--no-commit-id', '-z', ...diffOpts, sha, ...PATHSPEC], cwd)
     .split('\0').filter(Boolean))];
   const units = [];
   names.forEach((name, i) => {
     const diff = `${header}\n(part ${i + 1} of ${names.length})\n`
-      + git(['diff-tree', '-p', '--no-commit-id', ...DIFF_OPTS, sha, '--', `:(top,literal)${name}`], cwd);
+      + git(['diff-tree', '-p', '--no-commit-id', ...diffOpts, sha, '--', `:(top,literal)${name}`], cwd);
     if (bytes(diff) > MAX_BATCH_BYTES) throw tooLarge(`one file in commit ${short}`);
     units.push({ diff, binaryPaths: binaryPaths.includes(name) ? [name] : [] });
   });

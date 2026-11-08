@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -140,6 +141,23 @@ test('check push: no images means no prompt and pass', () => {
   const base = head(dir);
   commitFiles(dir, { 'b.md': 'text' });
   assert.equal(runPush(dir, refFor(dir, base), { GUARD_TTY: '/nonexistent' }).status, 0);
+});
+
+// F2: a large image is held as an image, and once a human confirms it the AI review is not
+// refused for size (the image is listed, not inlined).
+test('F2: a 250 KB image push gets the image hold, not AI_TOO_LARGE', () => {
+  const dir = mkRepo();
+  const base = head(dir);
+  commitFiles(dir, { 'shot.png': Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0]), crypto.randomBytes(250_000)]) });
+  const ref = refFor(dir, base);
+  const agent = { CLAUDECODE: '1', GUARD_AI_CMD: path.join(ROOT, 'tests/guard/fixtures/fake-claude-pass.sh') };
+  const held = runPush(dir, ref, { ...agent, GUARD_TTY: '/nonexistent' });
+  assert.equal(held.status, 1);
+  assert.match(held.out, /image needs confirmation: shot\.png/);
+  assert.doesNotMatch(held.out, /AI_TOO_LARGE|split this push/);
+  const confirmed = runPush(dir, ref, { ...agent, GUARD_TTY: tty('y\n') });
+  assert.equal(confirmed.status, 0, confirmed.out);
+  assert.match(confirmed.out, /AI review passed \(1 batch\)/);
 });
 
 test('check push: image path containing a blocked term is masked in output', () => {

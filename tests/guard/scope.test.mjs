@@ -60,6 +60,7 @@ test('pushRange: new branch, deletion, update', () => {
 });
 
 // ---------- R22: AI review input batched by commit ----------
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -163,6 +164,41 @@ test('R22: binary paths are listed with the batch of their commit', () => {
   commit(dir, { 'p.png': Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2]) }, 'picture');
   const b = reviewBatchesForPush(refsFor(dir, base), dir);
   assert.deepEqual(b[0].binaryPaths, ['p.png']);
+});
+
+// ---------- F2: binaries stay out of the AI diff ----------
+test('F2: a 250 KB image is listed as a binary path, not inlined into the AI diff', () => {
+  const dir = batchRepo();
+  const base = head(dir);
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0]), crypto.randomBytes(250_000)]);
+  commit(dir, { 'img/shot.png': png, 'notes.md': 'caption text\n' }, 'add a screenshot');
+  const b = reviewBatchesForPush(refsFor(dir, base), dir);
+  assert.equal(b.length, 1);
+  assert.ok(Buffer.byteLength(b[0].diff) < 5_000, `AI diff is ${Buffer.byteLength(b[0].diff)} bytes`);
+  assert.deepEqual(b[0].binaryPaths, ['img/shot.png']);
+  assert.match(b[0].diff, /Binary files .*img\/shot\.png differ/);
+  assert.match(b[0].diff, /\+caption text/);
+});
+
+test('F2: a text file marked binary by .gitattributes is still shown to the AI', () => {
+  const dir = batchRepo();
+  const base = head(dir);
+  commit(dir, { '.gitattributes': '*.md -diff\n*.txt binary\n', 'h.md': 'hidden words here\n', 'n.txt': 'note words here\n' }, 'attrs');
+  const b = reviewBatchesForPush(refsFor(dir, base), dir);
+  assert.equal(b.length, 1);
+  assert.match(b[0].diff, /\+hidden words here/);
+  assert.match(b[0].diff, /\+note words here/);
+});
+
+test('F2: a modified 250 KB image keeps the AI diff small', () => {
+  const dir = batchRepo();
+  commit(dir, { 'pic.png': Buffer.concat([Buffer.from([0x89, 0x50, 0, 0]), crypto.randomBytes(250_000)]) }, 'first');
+  const base = head(dir);
+  commit(dir, { 'pic.png': Buffer.concat([Buffer.from([0x89, 0x50, 0, 0]), crypto.randomBytes(250_000)]) }, 'replace');
+  const b = reviewBatchesForPush(refsFor(dir, base), dir);
+  assert.equal(b.length, 1);
+  assert.ok(Buffer.byteLength(b[0].diff) < 5_000);
+  assert.deepEqual(b[0].binaryPaths, ['pic.png']);
 });
 
 test('R22: an empty push has no batches; a deleted ref is skipped', () => {
